@@ -1,0 +1,10 @@
+services:
+  scapv2:
+    image: scapv2
+    build:
+      context: swift
+      dockerfile: ./Dockerfile
+    environment:
+      NODE_ENV: production
+    ports:
+      - 3000:3000

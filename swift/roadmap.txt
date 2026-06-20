@@ -1,0 +1,17 @@
+Week 1: Core Foundation & AuthenticationSetup:
+Initialize the NestJS project. Configure TypeScript, ESLint, and your Git workflow.
+Database: Set up MongoDB Atlas or a local Docker container. Establish your MongooseModule connection.
+Security: Implement global pipes (ValidationPipe) and a global exception filter (p. 24).
+Auth System: Build the AuthModule (p. 23):Implement user registration and login endpoints (bcrypt for hashing, @nestjs/jwt for access tokens) (p. 23).
+Build a mock OTP SMS/Email helper service for phone/email verification flow (pp. 23, 29).
+Week 2: Profiles & AI Matching ArchitectureUser Management: 
+Build the UsersModule to handle Seeker and Professional profile schemas (pp. 24, 30).
+Location Setup: Implement GeoJSON point indexes (2dsphere) on the professional profiles so MongoDB can calculate distances automatically (pp. 2, 30).
+Matching Module: Build the core database query engine for GET /matching/recommendations (pp. 23, 30):Write a MongoDB aggregation pipeline that filters by profile category, coordinates/distance range, pricing bounds, and rating thresholds (pp. 23, 30).
+Week 3: Secure Escrow Payments & Live ChatPayments Module: 
+Wire up your payment gateway (e.g., Paystack or Flutterwave) to handle card/bank charges (pp. 24, 28).
+Escrow Logic: Implement the BookingModule state transitions (pp. 28, 32):Create a clean sequence for funds checking, capturing payments to escrow, and programmatic payout releases or dispute-refund actions (pp. 23, 28, 32).
+WebSocket Engine: Set up @nestjs/websockets (Socket.io) inside a CommunicationsModule (pp. 24, 32):Build event gateways to manage active chat rooms, pass message payloads, broadcast real-time typing signs, and handle call signaling (pp. 23, 32).
+Week 4: Optimization, Tests & DeploymentAI Tuning: Replace any mock recommendation rules with your trained model service hooks or internal vector algorithms (p. 24).Testing: Write end-to-end integration tests using supertest for your primary auth, matching, and payment flows.
+Deployment Preparations: Build a custom Dockerfile. Setup logging middleware (e.g., Winston) and system health checks (@nestjs/terminus).
+Launch: Deploy the live backend package onto a scalable platform like Render, Railway, AWS ECS, or DigitalOcean App Platform.
