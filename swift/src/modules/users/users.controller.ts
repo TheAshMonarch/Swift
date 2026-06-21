@@ -1,21 +1,45 @@
-import { Controller, Get, UseGuards } from '@nestjs/common';
+import { Controller, Get, Post, Put, Body, Param, UseGuards, Req } from '@nestjs/common';
+import { UsersService } from './users.service';
+import { UpdateUserDto } from './dto/update-user.dto';
+import { SearchProvidersDto } from './dto/search-providers.dto';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
-import { GetUser } from '@common/decorators/get-user.decorator';
 
 @Controller('users')
 export class UsersController {
-  
+  constructor(private readonly usersService: UsersService) {}
+
   @Get('me')
-  @UseGuards(JwtAuthGuard) // First, the guard checks the JWT token
-  getProfile(@GetUser() user: { userId: string; email: string; role: string }): { userId: string; email: string; role: string } {
-    // The decorator automatically plucks the user out here
-    return user;
+  @UseGuards(JwtAuthGuard)
+  getMe(@Req() req: any) {
+    return this.usersService.findById(req.user.userId);
   }
 
-  @Get('my-id')
+  @Put('me')
   @UseGuards(JwtAuthGuard)
-  getOnlyId(@GetUser('userId') userId: string): { id: string } {
-    // You can also grab a single property directly out of the token payload
-    return { id: userId };
+  updateMe(@Req() req: any, @Body() dto: UpdateUserDto) {
+    return this.usersService.update(req.user.userId, dto);
+  }
+
+  @Post('search/providers')
+  searchProviders(@Body() dto: SearchProvidersDto) {
+    return this.usersService.searchProviders(dto);
+  }
+
+  @Get(':id')
+  @UseGuards(JwtAuthGuard)
+  findById(@Param('id') id: string) {
+    return this.usersService.findById(id);
+  }
+
+  @Post(':id/rating')
+  @UseGuards(JwtAuthGuard)
+  addRating(@Param('id') id: string, @Body('rating') rating: number) {
+    return this.usersService.addRating(id, rating);
+  }
+
+  @Get(':id/stats')
+  @UseGuards(JwtAuthGuard)
+  getStats(@Param('id') id: string) {
+    return this.usersService.getProviderStats(id);
   }
 }

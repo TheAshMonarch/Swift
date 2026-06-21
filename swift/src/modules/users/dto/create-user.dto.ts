@@ -1,60 +1,54 @@
-// import { IsEmail, IsString, MinLength, IsOptional, IsArray, IsNumber } from 'class-validator';
-// import { UserRole } from '../users.schema';
+import { IsEmail, IsString, MinLength, IsNotEmpty, IsEnum, IsArray, IsNumber, IsOptional, ValidateNested } from 'class-validator';
+import { Type } from 'class-transformer';
 
-// export class CreateUserDto {
-//     @IsEmail()
-//     email: string;
+export class LocationDto {
+	@IsArray()
+	@IsNumber({}, { each: true })
+	coordinates!: [number, number]; // Strictly [longitude, latitude]
+}
 
-//     @IsString()
-//     @MinLength(8)
-//     password: string;
+export class ProProfileDto {
+	@IsString()
+	@IsNotEmpty()
+	category!: string;
 
-//     @IsString()
-//     firstName: string;
+	@IsArray()
+	@IsString({ each: true })
+	skills!: string[];
 
-//     @IsString()
-//     lastName: string;
+	@IsNumber()
+	hourlyRate!: number;
+}
 
-//     @IsString()
-//     @IsOptional()
-//     phoneNumber: string;
+export class CreateUserDto {
+	@IsString()
+	@IsNotEmpty()
+	name!: string;
 
-//     @IsString()
-//     role: UserRole;
+	@IsEmail()
+	email!: string;
 
-//     @IsString()
-//     @IsOptional()
-//     bio: string;
+	@IsString()
+	@MinLength(6)
+	password!: string;
 
-//     @IsArray()
-//     @IsOptional()
-//     skills: string[];
+	@IsString()
+	@IsNotEmpty()
+	phone!: string;
 
-//     @IsString()
-//     @IsOptional()
-//     location: string;
+	@IsEnum(['seeker', 'professional', 'admin'])
+	role!: string;
 
-//     @IsString()
-//     @IsOptional()
-//     city: string;
+	@ValidateNested()
+	@Type(() => LocationDto)
+	location!: LocationDto;
 
-//     @IsString()
-//     @IsOptional()
-//     state: string;
+	@IsOptional()
+	@ValidateNested()
+	@Type(() => ProProfileDto)
+	proProfile?: ProProfileDto;
 
-//     @IsNumber()
-//     @IsOptional()
-//     latitude: number;
-
-//     @IsNumber()
-//     @IsOptional()
-//     longitude: number;
-
-//     @IsNumber()
-//     @IsOptional()
-//     hourlyRate: number;
-
-//     @IsArray()
-//     @IsOptional()
-//     serviceCategories: string[];
-// }
+	@IsOptional()
+	@IsString()
+	googleId?: string;
+}

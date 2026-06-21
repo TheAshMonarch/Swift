@@ -1,37 +1,49 @@
-import { IsArray, IsNumber, IsString, IsOptional } from "class-validator";
+import { IsOptional, IsArray, IsNumber, IsString, Min, Max } from 'class-validator';
+import { Type } from 'class-transformer';
 
 export class SearchProvidersDto {
-    @IsOptional()
-    @IsArray()
-    @IsString({ each: true })
-    skills?: string[];
+  @IsOptional()
+  @IsArray()
+  @IsNumber({}, { each: true })
+  coordinates?: [number, number]; // [longitude, latitude]
 
-    @IsOptional()
-    @IsString()
-    state?: string;
+  @IsOptional()
+  @IsNumber()
+  @Min(1)
+  @Max(200)
+  @Type(() => Number)
+  radiusKm?: number;
 
-    @IsOptional()
-    @IsArray()
-    @IsString({ each: true })
-    serviceCategories?: string[];
+  @IsOptional()
+  @IsString()
+  category?: string;
 
-    @IsOptional()
-    @IsString()
-    city?: string;
+  @IsOptional()
+  @IsArray()
+  @IsString({ each: true })
+  skills?: string[];
 
-    @IsOptional()
-    @IsNumber()
-    latitude?: number;
+  @IsOptional()
+  @IsNumber()
+  @Min(0)
+  @Max(5)
+  @Type(() => Number)
+  minRating?: number;
 
-    @IsOptional()
-    @IsNumber()
-    longitude?: number;
+  @IsOptional()
+  @IsNumber()
+  @Type(() => Number)
+  minRate?: number;
 
-    @IsOptional()
-    @IsNumber()
-    minRating?: number;
+  @IsOptional()
+  @IsNumber()
+  @Type(() => Number)
+  maxRate?: number;
 
-    @IsOptional()
-    @IsNumber()
-    maxDistance?: number;
+  @IsOptional()
+  @IsNumber()
+  @Min(1)
+  @Max(100)
+  @Type(() => Number)
+  limit?: number;
 }

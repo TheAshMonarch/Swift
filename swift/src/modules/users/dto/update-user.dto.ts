@@ -1,66 +1,29 @@
-import { IsEmail, IsString, IsOptional, IsArray, IsNumber } from 'class-validator';
+import { IsOptional, IsString, IsNumber, IsArray, ValidateNested } from 'class-validator';
+import { Type } from 'class-transformer';
+
+class UpdateLocationDto {
+  @IsArray()
+  @IsNumber({}, { each: true })
+  coordinates!: [number, number];
+}
+
+class UpdateProProfileDto {
+  @IsOptional() @IsString() category?: string;
+  @IsOptional() @IsArray() @IsString({ each: true }) skills?: string[];
+  @IsOptional() @IsNumber() hourlyRate?: number;
+}
 
 export class UpdateUserDto {
-    @IsString()
-    @IsOptional()
-    firstName: string;
+  @IsOptional() @IsString() name?: string;
+  @IsOptional() @IsString() phone?: string;
 
-    @IsString()
-    @IsOptional()
-    lastName: string;
+  @IsOptional()
+  @ValidateNested()
+  @Type(() => UpdateLocationDto)
+  location?: UpdateLocationDto;
 
-    @IsString()
-    @IsOptional()
-    phoneNumber: string;
-
-    @IsString()
-    @IsOptional()
-    avatar: string;
-
-    @IsString()
-    @IsOptional()
-    bio: string;
-
-    @IsArray()
-    @IsOptional()
-    skills: string[];
-
-    @IsString()
-    @IsOptional()
-    location: string;
-
-    @IsString()
-    @IsOptional()
-    city: string;
-
-    @IsString()
-    @IsOptional()
-    state: string;
-
-    @IsNumber()
-    @IsOptional()
-    latitude: number;
-
-    @IsNumber()
-    @IsOptional()
-    longitude: number;
-
-    @IsNumber()
-    @IsOptional()
-    hourlyRate: number;
-
-    @IsArray()
-    @IsOptional()
-    serviceCategories: string[];
-
-    @IsOptional()
-    bankDetails: {
-        accountName: string;
-        accountNumber: string;
-        bankCode: string;
-        bankName: string;
-    };
-
-    @IsOptional()
-    isFeatured?: boolean;
+  @IsOptional()
+  @ValidateNested()
+  @Type(() => UpdateProProfileDto)
+  proProfile?: UpdateProProfileDto;
 }
