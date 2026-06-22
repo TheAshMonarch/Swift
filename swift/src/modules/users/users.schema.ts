@@ -69,7 +69,6 @@ export class User extends Document {
   @Prop({ type: String, sparse: true })
   googleId?: string;
 
-  // --- NEWLY ADDED PROPERTIES MATCHING THE SERVICE LAYER ---
   @Prop({ type: Date })
   lastLogin?: Date;
 
@@ -77,7 +76,7 @@ export class User extends Document {
   isActive: boolean = true;
 
  @Prop({ type: { accountNumber: String, bankCode: String, bankName: String }, required: false })
-bankDetails?: { accountNumber: string; bankCode: string; bankName: string };
+  bankDetails?: { accountNumber: string; bankCode: string; bankName: string };
 }
 
 export const UserSchema = SchemaFactory.createForClass(User);

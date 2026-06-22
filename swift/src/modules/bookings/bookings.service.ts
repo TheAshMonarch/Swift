@@ -46,6 +46,19 @@ export class BookingsService {
     return booking.save();
   }
 
+  // Professional starts the job
+  async startJob(bookingId: string, professionalId: string): Promise<Booking> {
+    const booking = await this.findAndValidate(bookingId);
+    if (booking.professionalId.toString() !== professionalId) {
+      throw new ForbiddenException('Not your booking');
+    }
+    if (booking.status !== BookingStatus.FUNDED) {
+      throw new BadRequestException('Job can only be started after payment is confirmed');
+    }
+    booking.status = BookingStatus.IN_PROGRESS;
+    return booking.save();
+  }
+
   // Seeker initiates payment — returns Paystack checkout URL
   async initiateFunding(bookingId: string, seekerId: string): Promise<{ paymentUrl: string; reference: string }> {
     const booking = await this.findAndValidate(bookingId);
@@ -123,11 +136,13 @@ export class BookingsService {
       bankCode: professional.bankDetails.bankCode,
     });
 
+    const payoutReference = `payout_${booking._id.toString()}`; // Deterministic reference
+
     const transfer = await this.paymentsService.initiateTransfer({
-      amountKobo: booking.professionalPayout,
-      recipientCode: recipient.recipient_code,
-      reference: this.paymentsService.generateReference('payout'),
-      reason: `Swift payout for booking ${bookingId}`,
+    amountKobo: booking.professionalPayout,
+    recipientCode: recipient.recipient_code,
+    reference: payoutReference, // Safe against retries
+    reason: `Swift payout for booking ${bookingId}`,
     });
 
     booking.status = BookingStatus.RELEASED;
