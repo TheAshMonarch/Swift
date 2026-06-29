@@ -1,6 +1,7 @@
 import { Injectable, BadRequestException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import axios from 'axios';
+import * as crypto from 'crypto';
 
 @Injectable()
 export class PaymentsService {
@@ -14,7 +15,6 @@ export class PaymentsService {
     };
   }
 
-  // Step 1: Initialize a transaction — gives frontend a payment URL
   async initializeTransaction(params: {
     email: string;
     amountKobo: number;
@@ -32,10 +32,9 @@ export class PaymentsService {
       },
       { headers: this.headers },
     );
-    return data.data; // { authorization_url, access_code, reference }
+    return data.data;
   }
 
-  // Step 2: Verify payment after seeker pays
   async verifyTransaction(reference: string) {
     const { data } = await axios.get(
       `${this.baseUrl}/transaction/verify/${reference}`,
@@ -47,7 +46,6 @@ export class PaymentsService {
     return data.data;
   }
 
-  // Step 3: Create a transfer recipient (professional's bank account)
   async createTransferRecipient(params: {
     name: string;
     accountNumber: string;
@@ -64,10 +62,9 @@ export class PaymentsService {
       },
       { headers: this.headers },
     );
-    return data.data; // { recipient_code }
+    return data.data;
   }
 
-  // Step 4: Release escrow — transfer funds to professional
   async initiateTransfer(params: {
     amountKobo: number;
     recipientCode: string;
@@ -85,10 +82,9 @@ export class PaymentsService {
       },
       { headers: this.headers },
     );
-    return data.data; // { transfer_code, status }
+    return data.data;
   }
 
-  // Step 5: Refund — reverse a charge
   async refundTransaction(transactionId: string, amountKobo?: number) {
     const { data } = await axios.post(
       `${this.baseUrl}/refund`,
@@ -98,7 +94,6 @@ export class PaymentsService {
     return data.data;
   }
 
-  // Utility: list banks for frontend dropdown
   async getBanks() {
     const { data } = await axios.get(
       `${this.baseUrl}/bank?currency=NGN`,
@@ -107,7 +102,16 @@ export class PaymentsService {
     return data.data;
   }
 
-  generateReference(prefix = 'swift'): string {
+  generateReference(prefix = 'artiz'): string {
     return `${prefix}_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
+  }
+
+  // ← NEW: Paystack sends a signature so you can confirm it's really them
+  verifyWebhookSignature(signature: string, rawBody: string): boolean {
+    const hash = crypto
+      .createHmac('sha512', this.config.get<string>('PAYSTACK_SECRET_KEY')!)
+      .update(rawBody)
+      .digest('hex');
+    return hash === signature;
   }
 }

@@ -5,7 +5,9 @@ import { HttpExceptionFilter } from './common/filters/http-exception.filter';
 import { IoAdapter } from '@nestjs/platform-socket.io';
 
 async function bootstrap(): Promise<void> {
-  const app = await NestFactory.create(AppModule);
+  const app = await NestFactory.create(AppModule, {
+    rawBody: true, // Enable raw body for webhook signature verification
+  });
 
   app.useGlobalPipes(
     new ValidationPipe({
@@ -26,6 +28,6 @@ async function bootstrap(): Promise<void> {
 
   const port = process.env.PORT || 3000;
   await app.listen(port);
-  console.log(`Swift Backend Engine running live on route: http://localhost:${port}`);
+  console.log(`Artiz Backend Engine running live on route: http://localhost:${port}`);
 }
 bootstrap();

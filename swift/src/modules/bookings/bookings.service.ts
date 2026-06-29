@@ -142,7 +142,7 @@ export class BookingsService {
     amountKobo: booking.professionalPayout,
     recipientCode: recipient.recipient_code,
     reference: payoutReference, // Safe against retries
-    reason: `Swift payout for booking ${bookingId}`,
+    reason: `Artiz payout for booking ${bookingId}`,
     });
 
     booking.status = BookingStatus.RELEASED;

@@ -13,6 +13,12 @@ class UpdateProProfileDto {
   @IsOptional() @IsNumber() hourlyRate?: number;
 }
 
+class UpdateBankDetailsDto {
+  @IsString() accountNumber!: string;
+  @IsString() bankCode!: string;
+  @IsString() bankName!: string;
+}
+
 export class UpdateUserDto {
   @IsOptional() @IsString() name?: string;
   @IsOptional() @IsString() phone?: string;
@@ -26,4 +32,9 @@ export class UpdateUserDto {
   @ValidateNested()
   @Type(() => UpdateProProfileDto)
   proProfile?: UpdateProProfileDto;
+
+  @IsOptional()
+  @ValidateNested()
+  @Type(() => UpdateBankDetailsDto)
+  bankDetails?: UpdateBankDetailsDto;
 }
