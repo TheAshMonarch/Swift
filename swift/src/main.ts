@@ -26,8 +26,7 @@ async function bootstrap(): Promise<void> {
 
   app.useWebSocketAdapter(new IoAdapter(app)); // ← add this
 
-  const port = process.env.PORT || 3000;
+  const port = process.env.PORT || 8080;
   await app.listen(port);
-  console.log(`Artiz Backend Engine running live on route: http://localhost:${port}`);
 }
 bootstrap();
