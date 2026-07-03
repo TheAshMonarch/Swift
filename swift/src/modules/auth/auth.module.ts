@@ -25,26 +25,26 @@ import { MailerModule } from '@nestjs-modules/mailer';
       }),
     }),
     
-    // Mailer configuration hooked up to environment variables
-    MailerModule.forRootAsync({
-      imports: [ConfigModule],
-      inject: [ConfigService],
-      useFactory: (config: ConfigService) => ({
-        transport: {
-          host: config.get<string>('MAIL_HOST'),
-          port: config.get<number>('MAIL_PORT'),
-          secure: config.get<number>('MAIL_PORT') === 465, // true for 465, false for 587
-          auth: {
-            user: config.get<string>('MAIL_USER'),
-            pass: config.get<string>('MAIL_PASSWORD'),
-          },
-        },
-        defaults: {
-          from: `"SWIFT App" <${config.get<string>('MAIL_FROM')}>`,
-        },
-      }),
-    }),
-  ],
+  // Mailer configuration hooked up to environment variables
+  MailerModule.forRoot({
+    transport: {
+      host: process.env.MAIL_HOST,
+      port: parseInt(process.env.MAIL_PORT || '587', 10),
+      secure: false, // false for 587
+      auth: {
+        user: process.env.MAIL_USER,
+        pass: process.env.MAIL_PASSWORD,
+      },
+      connectionTimeout: 10000, // 10 seconds timeout
+      greetingTimeout: 10000,
+      socketTimeout: 10000,
+      dnsLookup: (hostname: string, options: any, callback: any) => {
+        // Forcing family: 4 restricts DNS resolution strictly to IPv4 address records
+        require('dns').lookup(hostname, { family: 4 }, callback);
+      },
+    } as any,
+  }),
+],
   controllers: [AuthController],
   providers: [
     AuthService, 
