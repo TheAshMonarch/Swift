@@ -167,40 +167,69 @@ export class AuthService {
     };
   }
 
-async sendOtp(phoneOrEmail: string): Promise<{ message: string }>{
-    const code = Math.floor(100000 + Math.random() * 900000).toString(); // Quick fix: bumped to guaranteed 6 digits
+  async sendOtp(phoneOrEmail: string): Promise<{ message: string }> {
+    const code = Math.floor(100000 + Math.random() * 900000).toString();
 
     const expiresAt = new Date();
     expiresAt.setMinutes(expiresAt.getMinutes() + 5);
 
+    // Mongoose update option clean up: use returnDocument instead of 'new' to clear deprecation warning
     await this.otpModel.findOneAndUpdate(
       { phoneOrEmail },
       { code, expiresAt },
-      { upsert: true, new: true }
+      { upsert: true, returnDocument: 'after' },
     );
 
-    // 🔥 LIVE EMAIL SEND: Replaces the mock logs
-    try {
-      await this.mailerService.sendMail({
-        to: phoneOrEmail,
-        subject: 'Verify Your SWIFT Account',
-        html: `
-          <div style="font-family: sans-serif; padding: 20px; border: 1px solid #eee; border-radius: 5px;">
-            <h2>Welcome to SWIFT!</h2>
-            <p>Use the following verification code to confirm your email address. It will expire in 5 minutes:</p>
-            <h1 style="color: #4F46E5; letter-spacing: 4px; font-size: 32px;">${code}</h1>
-            <p style="font-size: 12px; color: #666;">If you didn't create an account, please ignore this email.</p>
-          </div>
-        `,
-      });
-    } catch (error) {
-      // Log it internally but don't crash registration if SMTP fails temporarily
-      console.error('Email delivery failed:', error);
+    //
+    const brevoApiKey = this.configService.get<string>('BREVO_API_KEY');
+
+    if (!brevoApiKey) {
+      console.error(
+        ' Brevo delivery skipped: BREVO_API_KEY environment variable is missing.',
+      );
+      return {
+        message: 'Verification OTP code generated (Email config missing).',
+      };
     }
 
-    return { message: 'Verification OTP code dispatched successfully.' };          
-  }
+    try {
+      const response = await fetch('https://api.brevo.com/v3/smtp/email', {
+        method: 'POST',
+        headers: {
+          accept: 'application/json',
+          'api-key': brevoApiKey,
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({
+          sender: { name: 'ARTIZ', email: 'rhemaamasi12@gmail.com' }, 
+          to: [{ email: phoneOrEmail }],
+          subject: 'Verify Your Artiz Account',
+          htmlContent: `
+            <div style="font-family: sans-serif; padding: 20px; border: 1px solid #eee; border-radius: 5px;">
+              <h2>Welcome to Artiz!</h2>
+              <p>Use the following verification code to confirm your email address. It will expire in 5 minutes:</p>
+              <h1 style="color: #4F46E5; letter-spacing: 4px; font-size: 32px;">${code}</h1>
+              <p style="font-size: 12px; color: #666;">If you didn't create an account, please ignore this email.</p>
+            </div>
+          `,
+        }),
+      });
 
+      if (!response.ok) {
+        const errorData = await response.json();
+        throw new Error(JSON.stringify(errorData));
+      }
+
+      console.log(
+        `✓ Verification email sent successfully via Brevo HTTP to ${phoneOrEmail}`,
+      );
+    } catch (error) {
+      // Log it internally so your server keeps running smoothly even if an API issue happens
+      console.error('❌ Brevo HTTP email delivery failed:', error);
+    }
+
+    return { message: 'Verification OTP code dispatched successfully.' };
+  }
 
   async verifyOtp(verifyOtpDto: VerifyOtpDto): Promise<{ message: string }> {
     const { phoneOrEmail, code } = verifyOtpDto;

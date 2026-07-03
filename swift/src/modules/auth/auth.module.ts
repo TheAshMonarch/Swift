@@ -9,7 +9,6 @@ import { JwtStrategy } from './jwt.strategy';
 import { UsersModule } from '../users/users.module';
 import { MongooseModule } from '@nestjs/mongoose';
 import { Otp, OtpSchema } from './otp.schema';
-import { MailerModule } from '@nestjs-modules/mailer';
 
 @Module({
   imports: [
@@ -24,26 +23,7 @@ import { MailerModule } from '@nestjs-modules/mailer';
         signOptions: { expiresIn: '7d' },
       }),
     }),
-    
-  // Mailer configuration hooked up to environment variables
-  MailerModule.forRoot({
-    transport: {
-      host: process.env.MAIL_HOST,
-      port: 465,
-      secure: true, // true for 465
-      auth: {
-        user: process.env.MAIL_USER,
-        pass: process.env.MAIL_PASSWORD,
-      },
-      connectionTimeout: 15000, // 15 seconds timeout
-      greetingTimeout: 10000,
-      socketTimeout: 10000,
-      dnsLookup: (hostname: string, options: any, callback: any) => {
-        // Forcing family: 4 restricts DNS resolution strictly to IPv4 address records
-        require('dns').lookup(hostname, { family: 4 }, callback);
-      },
-    } as any,
-  }),
+
 ],
   controllers: [AuthController],
   providers: [
