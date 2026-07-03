@@ -27,7 +27,6 @@ export class AuthService {
     @InjectModel(Otp.name) private readonly otpModel: Model<Otp>,
     private readonly jwtService: JwtService,
     private readonly configService: ConfigService, // Inject ConfigService
-    private readonly mailerService: MailerService, // Inject MailerService
   ) {
     // Initialize the Google verifier client
     this.googleClient = new OAuth2Client(
