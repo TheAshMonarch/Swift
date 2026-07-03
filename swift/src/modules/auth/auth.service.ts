@@ -1,4 +1,9 @@
-import { Injectable, ConflictException, UnauthorizedException, BadRequestException } from '@nestjs/common';
+import {
+  Injectable,
+  ConflictException,
+  UnauthorizedException,
+  BadRequestException,
+} from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model } from 'mongoose';
 import * as bcrypt from 'bcrypt';
@@ -11,6 +16,7 @@ import { OAuth2Client } from 'google-auth-library';
 import { GoogleLoginDto } from './google-login.dto';
 import { Otp } from './otp.schema'; // Import Otp Schema
 import { VerifyOtpDto } from './verify-otp.dto';
+import { MailerService } from '@nestjs-modules/mailer';
 
 @Injectable()
 export class AuthService {
@@ -21,27 +27,33 @@ export class AuthService {
     @InjectModel(Otp.name) private readonly otpModel: Model<Otp>,
     private readonly jwtService: JwtService,
     private readonly configService: ConfigService, // Inject ConfigService
+    private readonly mailerService: MailerService, // Inject MailerService
   ) {
     // Initialize the Google verifier client
-    this.googleClient = new OAuth2Client(this.configService.get<string>('GOOGLE_CLIENT_ID'));
+    this.googleClient = new OAuth2Client(
+      this.configService.get<string>('GOOGLE_CLIENT_ID'),
+    );
   }
 
-  async googleLogin(googleLoginDto: GoogleLoginDto): Promise<{message: string; accessToken: string; role: string }>{
+  async googleLogin(
+    googleLoginDto: GoogleLoginDto,
+  ): Promise<{ message: string; accessToken: string; role: string }> {
     const { token, location } = googleLoginDto;
 
-    try{
+    try {
       const ticket = await this.googleClient.verifyIdToken({
         idToken: token,
         audience: this.configService.get<string>('GOOGLE_CLIENT_ID'),
       });
 
       const payload = ticket.getPayload();
-      if(!payload || !payload.email) throw new UnauthorizedException('Invalid Google token payload');
+      if (!payload || !payload.email)
+        throw new UnauthorizedException('Invalid Google token payload');
       const { email, name } = payload;
 
       let user = await this.userModel.findOne({ email });
 
-      if(!user){
+      if (!user) {
         const formattedLocation = {
           type: 'Point',
           coordinates: location.coordinates,
@@ -50,7 +62,7 @@ export class AuthService {
         user = new this.userModel({
           name: name || 'Google User',
           email,
-          phone:`google-${Date.now()}`,
+          phone: `google-${Date.now()}`,
           passwordHash: 'OAUTH_USER_NO_PASSWORD',
           role: 'seeker',
           isVerified: true,
@@ -59,23 +71,31 @@ export class AuthService {
         await user.save();
       }
 
-      const jwtPayload = { sub:  user._id.toString(), email: user.email, role: user.role };
+      const jwtPayload = {
+        sub: user._id.toString(),
+        email: user.email,
+        role: user.role,
+      };
 
       return {
-        message: "google login successful",
+        message: 'google login successful',
         accessToken: this.jwtService.sign(jwtPayload),
         role: user.role,
       };
-    }catch(error){
+    } catch (error) {
       throw new UnauthorizedException('Google authentication failed');
     }
   }
 
-  async register(registerDto: RegisterDto): Promise<Omit<User, 'passwordHash'>> {
+  async register(
+    registerDto: RegisterDto,
+  ): Promise<Omit<User, 'passwordHash'>> {
     const { email, phone, password, location, ...rest } = registerDto;
 
     // Check if user already exists
-    const existingUser = await this.userModel.findOne({ $or: [{ email }, { phone }] });
+    const existingUser = await this.userModel.findOne({
+      $or: [{ email }, { phone }],
+    });
     if (existingUser) {
       throw new ConflictException('Email or phone number already registered');
     }
@@ -83,7 +103,6 @@ export class AuthService {
     // Hash the password safely
     const salt = await bcrypt.genSalt(10);
     const passwordHash = await bcrypt.hash(password, salt);
-
 
     // Format location for MongoDB GeoJSON
     const formattedLocation = {
@@ -97,10 +116,13 @@ export class AuthService {
       phone,
       passwordHash,
       location: formattedLocation,
+      verified: false,
     });
 
     const savedUser = await newUser.save();
-    
+
+    await this.sendOtp(email);
+
     const cleanUser = JSON.parse(JSON.stringify(savedUser));
 
     delete cleanUser.passwordHash;
@@ -110,7 +132,9 @@ export class AuthService {
     return cleanUser;
   }
 
-  async login(loginDto: LoginDto): Promise<{ message: string; accessToken: string; role: string }> {
+  async login(
+    loginDto: LoginDto,
+  ): Promise<{ message: string; accessToken: string; role: string }> {
     const { email, password } = loginDto;
 
     const user = await this.userModel.findOne({ email });
@@ -123,8 +147,18 @@ export class AuthService {
       throw new UnauthorizedException('Invalid email or password');
     }
 
+    if (!user.isVerified) {
+      throw new UnauthorizedException(
+        'Please verify your email address before logging in.',
+      );
+    }
+
     // Set up what information stays packed safely inside the client token
-    const payload = { sub: user._id.toString(), email: user.email, role: user.role };
+    const payload = {
+      sub: user._id.toString(),
+      email: user.email,
+      role: user.role,
+    };
 
     return {
       message: 'Login successful',
@@ -133,9 +167,8 @@ export class AuthService {
     };
   }
 
-  async sendOtp(phoneOrEmail: string): Promise<{ message: string }>{
-
-    const code = Math.floor(100000 + Math.random() * 90000).toString();
+async sendOtp(phoneOrEmail: string): Promise<{ message: string }>{
+    const code = Math.floor(100000 + Math.random() * 900000).toString(); // Quick fix: bumped to guaranteed 6 digits
 
     const expiresAt = new Date();
     expiresAt.setMinutes(expiresAt.getMinutes() + 5);
@@ -146,14 +179,28 @@ export class AuthService {
       { upsert: true, new: true }
     );
 
-    // MOCK SEND LOGS: This mimics a live Termii / Twilio / SendGrid hook channel
-    console.log(`\n--- SWIFT MOCK NOTIFICATION SYSTEM ---`);
-    console.log(`[SENDING TO]: ${phoneOrEmail}`);
-    console.log(`[OTP VERIFICATION CODE]: ${code}`);
-    console.log(`-----------------------------------------\n`);
+    // 🔥 LIVE EMAIL SEND: Replaces the mock logs
+    try {
+      await this.mailerService.sendMail({
+        to: phoneOrEmail,
+        subject: 'Verify Your SWIFT Account',
+        html: `
+          <div style="font-family: sans-serif; padding: 20px; border: 1px solid #eee; border-radius: 5px;">
+            <h2>Welcome to SWIFT!</h2>
+            <p>Use the following verification code to confirm your email address. It will expire in 5 minutes:</p>
+            <h1 style="color: #4F46E5; letter-spacing: 4px; font-size: 32px;">${code}</h1>
+            <p style="font-size: 12px; color: #666;">If you didn't create an account, please ignore this email.</p>
+          </div>
+        `,
+      });
+    } catch (error) {
+      // Log it internally but don't crash registration if SMTP fails temporarily
+      console.error('Email delivery failed:', error);
+    }
 
     return { message: 'Verification OTP code dispatched successfully.' };          
   }
+
 
   async verifyOtp(verifyOtpDto: VerifyOtpDto): Promise<{ message: string }> {
     const { phoneOrEmail, code } = verifyOtpDto;
@@ -161,7 +208,9 @@ export class AuthService {
     // Search for the matching active code parameter
     const record = await this.otpModel.findOne({ phoneOrEmail, code });
     if (!record) {
-      throw new BadRequestException('Invalid verification code or code expired.');
+      throw new BadRequestException(
+        'Invalid verification code or code expired.',
+      );
     }
 
     // Check if the current time is past the expiration mark
@@ -173,7 +222,7 @@ export class AuthService {
     // Set user account to verified inside your database
     await this.userModel.updateOne(
       { $or: [{ email: phoneOrEmail }, { phone: phoneOrEmail }] },
-      { isVerified: true }
+      { isVerified: true },
     );
 
     // Remove the OTP record since it has served its purpose
