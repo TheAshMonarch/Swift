@@ -1,13 +1,18 @@
-import { IsNotEmpty, IsString, IsArray, IsNumber, ValidateNested } from 'class-validator';
+import { IsNotEmpty, IsString, IsOptional, ValidateNested } from 'class-validator';
 import { Type } from 'class-transformer';
 import { LocationDto } from './register.dto';
 
 export class GoogleLoginDto {
   @IsString()
   @IsNotEmpty()
-  token!: string; // The Id Token sent from the frontend app
+  token!: string;
 
+  @IsOptional()
   @ValidateNested()
   @Type(() => LocationDto)
-  location!: LocationDto; // We still need coordinates to place them on the map
+  location?: LocationDto; // Optional fallback if browser permissions are turned off
+
+  @IsOptional()
+  @IsString()
+  role?: string; // Captures whether they clicked 'seeker' or 'professional'
 }

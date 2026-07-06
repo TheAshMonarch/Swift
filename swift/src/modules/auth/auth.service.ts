@@ -41,15 +41,12 @@ export class AuthService {
     return cleanUser;
   }
 
-  async googleLogin(
-    googleLoginDto: GoogleLoginDto,
-  ): Promise<{
+  async googleLogin(googleLoginDto: GoogleLoginDto): Promise<{
     message: string;
     accessToken: string;
     user: Omit<User, 'passwordHash'>;
   }> {
-    // 👈 Updated return type
-    const { token, location } = googleLoginDto;
+    const { token, location, role } = googleLoginDto;
 
     try {
       const ticket = await this.googleClient.verifyIdToken({
@@ -65,9 +62,11 @@ export class AuthService {
       let user = await this.userModel.findOne({ email });
 
       if (!user) {
+        // Use provided coordinates or fall back safely to your default Uyo coordinates
+        const coordinates = location?.coordinates || [7.92, 5.03];
         const formattedLocation = {
           type: 'Point',
-          coordinates: location.coordinates,
+          coordinates: coordinates,
         };
 
         user = new this.userModel({
@@ -75,7 +74,7 @@ export class AuthService {
           email,
           phone: `google-${Date.now()}`,
           passwordHash: 'OAUTH_USER_NO_PASSWORD',
-          role: 'seeker',
+          role: role || 'seeker', // Uses the user's intent from the UI selection
           isVerified: true,
           location: formattedLocation,
         });
@@ -91,9 +90,10 @@ export class AuthService {
       return {
         message: 'google login successful',
         accessToken: this.jwtService.sign(jwtPayload),
-        user: this.sanitizeUser(user), // 👈 Returning the complete sanitized user object
+        user: this.sanitizeUser(user),
       };
     } catch (error) {
+      console.error('Google verify error details:', error);
       throw new UnauthorizedException('Google authentication failed');
     }
   }
@@ -133,9 +133,7 @@ export class AuthService {
     return this.sanitizeUser(savedUser);
   }
 
-  async login(
-    loginDto: LoginDto,
-  ): Promise<{
+  async login(loginDto: LoginDto): Promise<{
     message: string;
     accessToken: string;
     user: Omit<User, 'passwordHash'>;
