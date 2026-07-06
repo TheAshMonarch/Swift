@@ -14,9 +14,8 @@ import { JwtService } from '@nestjs/jwt';
 import { ConfigService } from '@nestjs/config';
 import { OAuth2Client } from 'google-auth-library';
 import { GoogleLoginDto } from './google-login.dto';
-import { Otp } from './otp.schema'; // Import Otp Schema
+import { Otp } from './otp.schema';
 import { VerifyOtpDto } from './verify-otp.dto';
-import { MailerService } from '@nestjs-modules/mailer';
 
 @Injectable()
 export class AuthService {
@@ -26,17 +25,30 @@ export class AuthService {
     @InjectModel(User.name) private readonly userModel: Model<User>,
     @InjectModel(Otp.name) private readonly otpModel: Model<Otp>,
     private readonly jwtService: JwtService,
-    private readonly configService: ConfigService, // Inject ConfigService
+    private readonly configService: ConfigService,
   ) {
-    // Initialize the Google verifier client
     this.googleClient = new OAuth2Client(
       this.configService.get<string>('GOOGLE_CLIENT_ID'),
     );
   }
 
+  // Helper method to completely strip out private fields before sending user data down
+  private sanitizeUser(user: any) {
+    const cleanUser = user.toObject
+      ? user.toObject()
+      : JSON.parse(JSON.stringify(user));
+    delete cleanUser.passwordHash;
+    return cleanUser;
+  }
+
   async googleLogin(
     googleLoginDto: GoogleLoginDto,
-  ): Promise<{ message: string; accessToken: string; role: string }> {
+  ): Promise<{
+    message: string;
+    accessToken: string;
+    user: Omit<User, 'passwordHash'>;
+  }> {
+    // 👈 Updated return type
     const { token, location } = googleLoginDto;
 
     try {
@@ -79,7 +91,7 @@ export class AuthService {
       return {
         message: 'google login successful',
         accessToken: this.jwtService.sign(jwtPayload),
-        role: user.role,
+        user: this.sanitizeUser(user), // 👈 Returning the complete sanitized user object
       };
     } catch (error) {
       throw new UnauthorizedException('Google authentication failed');
@@ -91,7 +103,6 @@ export class AuthService {
   ): Promise<Omit<User, 'passwordHash'>> {
     const { email, phone, password, location, ...rest } = registerDto;
 
-    // Check if user already exists
     const existingUser = await this.userModel.findOne({
       $or: [{ email }, { phone }],
     });
@@ -99,11 +110,9 @@ export class AuthService {
       throw new ConflictException('Email or phone number already registered');
     }
 
-    // Hash the password safely
     const salt = await bcrypt.genSalt(10);
     const passwordHash = await bcrypt.hash(password, salt);
 
-    // Format location for MongoDB GeoJSON
     const formattedLocation = {
       type: 'Point',
       coordinates: location.coordinates,
@@ -119,21 +128,18 @@ export class AuthService {
     });
 
     const savedUser = await newUser.save();
-
     await this.sendOtp(email);
 
-    const cleanUser = JSON.parse(JSON.stringify(savedUser));
-
-    delete cleanUser.passwordHash;
-    delete cleanUser.password;
-
-    // Hide passwordHash in the return object
-    return cleanUser;
+    return this.sanitizeUser(savedUser);
   }
 
   async login(
     loginDto: LoginDto,
-  ): Promise<{ message: string; accessToken: string; role: string }> {
+  ): Promise<{
+    message: string;
+    accessToken: string;
+    user: Omit<User, 'passwordHash'>;
+  }> {
     const { email, password } = loginDto;
 
     const user = await this.userModel.findOne({ email });
@@ -152,7 +158,6 @@ export class AuthService {
       );
     }
 
-    // Set up what information stays packed safely inside the client token
     const payload = {
       sub: user._id.toString(),
       email: user.email,
@@ -161,8 +166,8 @@ export class AuthService {
 
     return {
       message: 'Login successful',
-      accessToken: this.jwtService.sign(payload), // Signs token with config options
-      role: user.role,
+      accessToken: this.jwtService.sign(payload),
+      user: this.sanitizeUser(user), //Returning the complete sanitized user object
     };
   }
 
@@ -200,7 +205,7 @@ export class AuthService {
           'content-type': 'application/json',
         },
         body: JSON.stringify({
-          sender: { name: 'ARTIZ', email: 'rhemaamasi12@gmail.com' }, 
+          sender: { name: 'ARTIZ', email: 'rhemaamasi12@gmail.com' },
           to: [{ email: phoneOrEmail }],
           subject: 'Verify Your Artiz Account',
           htmlContent: `

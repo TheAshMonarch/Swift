@@ -20,13 +20,13 @@ export class AuthController {
 
   @Post('login')
   @HttpCode(HttpStatus.OK)
-  async login(@Body() loginDto: LoginDto): Promise<{ message: string; accessToken: string; role: string }> {
+  async login(@Body() loginDto: LoginDto): Promise<{ message: string; accessToken: string; user: Omit<User, 'passwordHash'> }> {
     return this.authService.login(loginDto);
   }
 
   @Post('google')
   @HttpCode(HttpStatus.OK)
-  async googleLogin(@Body() googleLoginDto: GoogleLoginDto): Promise<{ message: string; accessToken: string; role: string }>{
+  async googleLogin(@Body() googleLoginDto: GoogleLoginDto): Promise<{ message: string; accessToken: string; user: Omit<User, 'passwordHash'>;}>{
     return this.authService.googleLogin(googleLoginDto);
   }
 
