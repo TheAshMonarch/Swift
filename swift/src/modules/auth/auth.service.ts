@@ -47,12 +47,15 @@ export class AuthService {
     user: Omit<User, 'passwordHash'>;
   }> {
     const { token, location, role } = googleLoginDto;
+    const t0 = Date.now();
 
     try {
       const ticket = await this.googleClient.verifyIdToken({
         idToken: token,
         audience: this.configService.get<string>('GOOGLE_CLIENT_ID'),
       });
+      const t1 = Date.now();
+      console.log(`[googleLogin] verifyIdToken: ${t1 - t0}ms`);
 
       const payload = ticket.getPayload();
       if (!payload || !payload.email)
@@ -60,9 +63,10 @@ export class AuthService {
       const { email, name } = payload;
 
       let user = await this.userModel.findOne({ email });
+      const t2 = Date.now();
+      console.log(`[googleLogin] findOne: ${t2 - t1}ms`);
 
       if (!user) {
-        // Use provided coordinates or fall back safely to your default Uyo coordinates
         const coordinates = location?.coordinates || [7.92, 5.03];
         const formattedLocation = {
           type: 'Point',
@@ -74,11 +78,13 @@ export class AuthService {
           email,
           phone: `google-${Date.now()}`,
           passwordHash: 'OAUTH_USER_NO_PASSWORD',
-          role: role || 'seeker', // Uses the user's intent from the UI selection
+          role: role || 'seeker',
           isVerified: true,
           location: formattedLocation,
         });
         await user.save();
+        const t3 = Date.now();
+        console.log(`[googleLogin] save (new user): ${t3 - t2}ms`);
       }
 
       const jwtPayload = {
@@ -87,9 +93,15 @@ export class AuthService {
         role: user.role,
       };
 
+      const signStart = Date.now();
+      const accessToken = this.jwtService.sign(jwtPayload);
+      console.log(`[googleLogin] jwt.sign: ${Date.now() - signStart}ms`);
+
+      console.log(`[googleLogin] TOTAL: ${Date.now() - t0}ms`);
+
       return {
         message: 'google login successful',
-        accessToken: this.jwtService.sign(jwtPayload),
+        accessToken,
         user: this.sanitizeUser(user),
       };
     } catch (error) {
