@@ -69,13 +69,17 @@ export class User extends Document {
   @Prop({ type: String, sparse: true })
   googleId?: string;
 
+  // New: Added support for incoming Google OAuth profile pictures or uploaded files
+  @Prop({ type: String, required: false })
+  avatar?: string;
+
   @Prop({ type: Date })
   lastLogin?: Date;
 
   @Prop({ type: Boolean, default: true })
   isActive: boolean = true;
 
- @Prop({ type: { accountNumber: String, bankCode: String, bankName: String }, required: false })
+  @Prop({ type: { accountNumber: String, bankCode: String, bankName: String }, required: false })
   bankDetails?: { accountNumber: string; bankCode: string; bankName: string };
 }
 
