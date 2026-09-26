@@ -1,4 +1,5 @@
 import { Controller, Post, Put, Get, Body, Param, UseGuards, Req } from '@nestjs/common';
+import { IsObjectIdPipe } from '@nestjs/mongoose';
 import { BookingsService } from './bookings.service';
 import { CreateBookingDto } from './dto/create-booking.dto';
 import { RateBookingDto } from './dto/rate-booking.dto';
@@ -16,13 +17,13 @@ export class BookingsController {
 
   @Put(':id/accept')
   @UseGuards(JwtAuthGuard)
-  accept(@Req() req: any, @Param('id') id: string) {
+  accept(@Req() req: any, @Param('id', IsObjectIdPipe) id: string) {
     return this.bookingsService.accept(id, req.user.userId);
   }
 
   @Post(':id/fund')
   @UseGuards(JwtAuthGuard)
-  initiateFunding(@Req() req: any, @Param('id') id: string) {
+  initiateFunding(@Req() req: any, @Param('id', IsObjectIdPipe) id: string) {
     return this.bookingsService.initiateFunding(id, req.user.userId);
   }
 
@@ -32,31 +33,31 @@ export class BookingsController {
 
   @Put(':id/complete')
   @UseGuards(JwtAuthGuard)
-  markComplete(@Req() req: any, @Param('id') id: string) {
+  markComplete(@Req() req: any, @Param('id', IsObjectIdPipe) id: string) {
     return this.bookingsService.markComplete(id, req.user.userId);
   }
 
   @Put(':id/release')
   @UseGuards(JwtAuthGuard)
-  releaseFunds(@Req() req: any, @Param('id') id: string) {
+  releaseFunds(@Req() req: any, @Param('id', IsObjectIdPipe) id: string) {
     return this.bookingsService.releaseFunds(id, req.user.userId);
   }
 
   @Put(':id/start')
   @UseGuards(JwtAuthGuard)
-  startJob(@Req() req: any, @Param('id') id: string) {
+  startJob(@Req() req: any, @Param('id', IsObjectIdPipe) id: string) {
     return this.bookingsService.startJob(id, req.user.userId);
   }
 
   @Put(':id/dispute')
   @UseGuards(JwtAuthGuard)
-  raiseDispute(@Req() req: any, @Param('id') id: string, @Body('reason') reason: string) {
+  raiseDispute(@Req() req: any, @Param('id', IsObjectIdPipe) id: string, @Body('reason') reason: string) {
     return this.bookingsService.raiseDispute(id, req.user.userId, reason);
   }
 
   @Post(':id/rating')
   @UseGuards(JwtAuthGuard)
-  rate(@Req() req: any, @Param('id') id: string, @Body() dto: RateBookingDto) {
+  rate(@Req() req: any, @Param('id', IsObjectIdPipe) id: string, @Body() dto: RateBookingDto) {
     return this.bookingsService.rate(id, req.user.userId, dto.rating);
   }
 

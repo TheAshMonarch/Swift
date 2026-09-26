@@ -51,7 +51,7 @@ The app reads these env vars: `MONGODB_URI`, `JWT_SECRET` (the app refuses to bo
 
 ## Gotchas
 
-- `AppController`/`AppService` are not registered in `AppModule`, so they're dead code and there is no root or health route.
+- `AppController`/`AppService` are not registered in `AppModule`, so they're dead code. The health check is `GET /health` (`modules/health`).
 - The tsconfig declares the path aliases `@common/*`, `@modules/*` and `@core/*`, but nothing uses them and `src/core` doesn't exist. Use relative imports.
-- Invalid ObjectIds in URL params currently cause a Mongoose CastError, which the exception filter turns into a 500.
+- Put `IsObjectIdPipe` (from `@nestjs/mongoose`) on every `:id` route param. As a fallback, the exception filter maps any Mongoose `CastError` to a 400.
 - `scripts/seed.ts` redefines the Mongoose schemas instead of importing them. If you change `users.schema.ts`, keep the seed script in sync.

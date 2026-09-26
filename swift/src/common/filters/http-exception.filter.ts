@@ -1,5 +1,6 @@
 import { ExceptionFilter, Catch, ArgumentsHost, HttpException, HttpStatus, Logger } from '@nestjs/common';
 import { Request, Response } from 'express';
+import { Error as MongooseError } from 'mongoose';
 
 @Catch()
 export class HttpExceptionFilter implements ExceptionFilter {
@@ -9,6 +10,18 @@ export class HttpExceptionFilter implements ExceptionFilter {
     const ctx = host.switchToHttp();
     const response = ctx.getResponse<Response>();
     const request = ctx.getRequest<Request>();
+
+    // A malformed id that slipped past IsObjectIdPipe (e.g. a body field) is a
+    // client error, not a server error. The message never includes the raw value.
+    if (exception instanceof MongooseError.CastError) {
+      response.status(HttpStatus.BAD_REQUEST).json({
+        statusCode: HttpStatus.BAD_REQUEST,
+        timestamp: new Date().toISOString(),
+        path: request.url,
+        message: [`Invalid ${exception.path}`],
+      });
+      return;
+    }
 
     // If it is a known NestJS HTTP error, get its status. Otherwise, treat it as a 500 Server Error.
     const status = exception instanceof HttpException

@@ -9,6 +9,7 @@ import { BookingsModule } from './modules/bookings/bookings.module';
 import { PaymentsModule } from './modules/payments/payments.module';
 import { ChatModule } from './modules/chat/chat.module';
 import { KycModule } from './modules/kyc/kyc.module';
+import { HealthModule } from './modules/health/health.module';
 
 @Module({
   imports: [
@@ -41,7 +42,8 @@ import { KycModule } from './modules/kyc/kyc.module';
     BookingsModule,
     PaymentsModule,
     ChatModule,
-    KycModule
+    KycModule,
+    HealthModule,
   ],
   providers: [
     { provide: APP_GUARD, useClass: ThrottlerGuard },

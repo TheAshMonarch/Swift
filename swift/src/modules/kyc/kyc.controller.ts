@@ -12,6 +12,7 @@ import {
   BadRequestException,
   ForbiddenException,
 } from '@nestjs/common';
+import { IsObjectIdPipe } from '@nestjs/mongoose';
 import { FileFieldsInterceptor } from '@nestjs/platform-express';
 import { memoryStorage } from 'multer';
 import { KycService } from './kyc.service';
@@ -101,14 +102,14 @@ export class KycController {
   // Admin: approve a submission
   @Put(':id/approve')
   @Roles('admin')
-  approve(@Req() req: any, @Param('id') id: string) {
+  approve(@Req() req: any, @Param('id', IsObjectIdPipe) id: string) {
     return this.kycService.approve(id, req.user.userId);
   }
 
   // Admin: reject a submission
   @Put(':id/reject')
   @Roles('admin')
-  reject(@Req() req: any, @Param('id') id: string, @Body() dto: RejectKycDto) {
+  reject(@Req() req: any, @Param('id', IsObjectIdPipe) id: string, @Body() dto: RejectKycDto) {
     return this.kycService.reject(id, req.user.userId, dto.reason);
   }
 }

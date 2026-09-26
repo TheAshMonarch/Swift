@@ -30,7 +30,7 @@ Derived directly from the source of `TheAshMonarch/Swift` (commit `f664f3d`, Nes
 }
 ```
 
-`message` is **always an array of strings**. Unknown server errors return 500 with `["Internal server error"]`. An invalid ObjectId in a URL param currently also returns 500 (see Known Issues).
+`message` is **always an array of strings**. Unknown server errors return 500 with `["Internal server error"]`. An invalid ObjectId in a URL param (`:id`) returns **400** (`"Invalid ObjectId: '…' is not a valid MongoDB ObjectId"`). Exception: `GET /chat/:userId` returns `[]`.
 
 ### Rate limits (per IP) → `429 Too Many Requests`
 
@@ -222,6 +222,11 @@ Errors: `401` "Invalid email or password", `401` "Please verify your email addre
 ```
 Google-created users are auto-verified, have a placeholder `phone`, no `avatar`, and professionals have **no `proProfile`** → prompt them to complete their profile via `PUT /users/me`.
 
+### 3.1a Health — `/health`
+
+#### 🔓 `GET /health` → `200 { status: "ok", db: "up", uptime: number }`
+`uptime` is in seconds. Returns `503` when the database is disconnected. Not rate-limited.
+
 ### 3.2 Users — `/users` (all 🔒)
 
 #### `GET /users/me` → `User`
@@ -409,4 +414,4 @@ Messages to offline users are saved and appear via REST; there's no push notific
 
 ## 6. Missing endpoints the frontend will likely need
 
-`GET /bookings/:id`, booking cancel/decline, `GET /payments/banks` (bank list for payout setup), forgot/reset password, admin dispute resolution/refund, admin user management, avatar upload, per-conversation unread counts, and a health check. Plan UI around their absence or add them to the backend first.
+`GET /bookings/:id`, booking cancel/decline, `GET /payments/banks` (bank list for payout setup), forgot/reset password, admin dispute resolution/refund, admin user management, avatar upload, and per-conversation unread counts. Plan UI around their absence or add them to the backend first.
