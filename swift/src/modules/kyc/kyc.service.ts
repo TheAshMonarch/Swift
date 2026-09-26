@@ -6,30 +6,42 @@ import {
 } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model, Types } from 'mongoose';
-import { v2 as cloudinary } from 'cloudinary';
 import { KycSubmission, KycStatus, IdType } from './kyc.schema';
 import { UsersService } from '../users/users.service';
+import { CloudinaryService } from '../../common/cloudinary/cloudinary.service';
+
+// What clients receive: same shape as before, with short-lived signed URLs.
+export type KycResponse = Omit<
+  KycSubmission,
+  'idImageFile' | 'selfieFile' | 'portfolioFiles'
+> & { idImageUrl?: string; selfieUrl?: string; portfolioUrls: string[] };
 
 @Injectable()
 export class KycService {
   constructor(
     @InjectModel(KycSubmission.name) private kycModel: Model<KycSubmission>,
     private usersService: UsersService,
+    private cloudinaryService: CloudinaryService,
   ) {}
 
-  // Upload a file buffer to Cloudinary and return the URL
-  private async uploadToCloudinary(
-    file: Express.Multer.File,
-    folder: string,
-  ): Promise<string> {
-    return new Promise((resolve, reject) => {
-      cloudinary.uploader
-        .upload_stream({ folder: `swift/kyc/${folder}` }, (error, result) => {
-          if (error || !result) return reject(error);
-          resolve(result.secure_url);
-        })
-        .end(file.buffer);
-    });
+  // Identity documents are stored privately — never as public URLs.
+  private uploadPrivate(file: Express.Multer.File, folder: string) {
+    return this.cloudinaryService.uploadPrivate(file.buffer, `swift/kyc/${folder}`);
+  }
+
+  // Replace stored private-file refs with signed URLs (valid 15 minutes).
+  toResponse(submission: KycSubmission): KycResponse {
+    const obj = submission.toObject();
+    const { idImageFile, selfieFile, portfolioFiles, ...rest } = obj;
+    const sign = this.cloudinaryService.signedUrl.bind(this.cloudinaryService);
+    return {
+      ...rest,
+      idImageUrl: idImageFile ? sign(idImageFile) : obj.idImageUrl,
+      selfieUrl: selfieFile ? sign(selfieFile) : obj.selfieUrl,
+      portfolioUrls: portfolioFiles?.length
+        ? portfolioFiles.map(sign)
+        : (obj.portfolioUrls ?? []),
+    };
   }
 
   async submitKyc(
@@ -40,7 +52,7 @@ export class KycService {
       selfie: Express.Multer.File;
       portfolio?: Express.Multer.File[];
     },
-  ): Promise<KycSubmission> {
+  ): Promise<KycResponse> {
     // Only professionals can submit KYC
     const user = await this.usersService.findById(userId);
     if (!user) throw new NotFoundException('User not found');
@@ -65,65 +77,65 @@ export class KycService {
       throw new BadRequestException('Already verified');
     }
 
-    // Upload files to Cloudinary
-    const [idImageUrl, selfieUrl] = await Promise.all([
-      this.uploadToCloudinary(files.idImage, 'id-documents'),
-      this.uploadToCloudinary(files.selfie, 'selfies'),
+    // Upload files privately to Cloudinary
+    const [idImageFile, selfieFile, portfolioFiles] = await Promise.all([
+      this.uploadPrivate(files.idImage, 'id-documents'),
+      this.uploadPrivate(files.selfie, 'selfies'),
+      Promise.all((files.portfolio ?? []).map((f) => this.uploadPrivate(f, 'portfolio'))),
     ]);
-
-    const portfolioUrls: string[] = [];
-    if (files.portfolio?.length) {
-      const uploads = await Promise.all(
-        files.portfolio.map((f) => this.uploadToCloudinary(f, 'portfolio')),
-      );
-      portfolioUrls.push(...uploads);
-    }
 
     // Upsert — allow resubmission after rejection
     if (existing) {
       existing.idType = idType;
-      existing.idImageUrl = idImageUrl;
-      existing.selfieUrl = selfieUrl;
-      existing.portfolioUrls = portfolioUrls;
+      existing.idImageFile = idImageFile;
+      existing.selfieFile = selfieFile;
+      existing.portfolioFiles = portfolioFiles;
+      existing.idImageUrl = undefined;
+      existing.selfieUrl = undefined;
+      existing.portfolioUrls = undefined;
       existing.status = KycStatus.PENDING;
       existing.rejectionReason = undefined;
       existing.reviewedAt = undefined;
-      return existing.save();
+      return this.toResponse(await existing.save());
     }
 
-    return this.kycModel.create({
+    const created = await this.kycModel.create({
       userId: new Types.ObjectId(userId),
       idType,
-      idImageUrl,
-      selfieUrl,
-      portfolioUrls,
+      idImageFile,
+      selfieFile,
+      portfolioFiles,
     });
+    return this.toResponse(created);
   }
 
-  async getMyStatus(userId: string): Promise<KycSubmission | null> {
-    return this.kycModel.findOne({ userId: new Types.ObjectId(userId) });
+  async getMyStatus(userId: string): Promise<KycResponse | null> {
+    const submission = await this.kycModel.findOne({ userId: new Types.ObjectId(userId) });
+    return submission ? this.toResponse(submission) : null;
   }
 
   // Admin: get all pending submissions
-  async getPending(): Promise<KycSubmission[]> {
-    return this.kycModel
+  async getPending(): Promise<KycResponse[]> {
+    const submissions = await this.kycModel
       .find({ status: KycStatus.PENDING })
-      .populate('userId', '-passwordHash')
+      .populate('userId', '-passwordHash -bankDetails')
       .sort({ createdAt: 1 }) // oldest first
       .exec();
+    return submissions.map((s) => this.toResponse(s));
   }
 
   // Admin: get all submissions
-  async getAll(): Promise<KycSubmission[]> {
-    return this.kycModel
+  async getAll(): Promise<KycResponse[]> {
+    const submissions = await this.kycModel
       .find()
-      .populate('userId', '-passwordHash')
+      .populate('userId', '-passwordHash -bankDetails')
       .sort({ createdAt: -1 })
       .exec();
+    return submissions.map((s) => this.toResponse(s));
   }
 
   // Admin: approve
-  async approve(submissionId: string, adminId: string): Promise<KycSubmission> {
+  async approve(submissionId: string, adminId: string): Promise<KycResponse> {
     const submission = await this.kycModel.findById(submissionId);
     if (!submission) throw new NotFoundException('Submission not found');
     if (submission.status !== KycStatus.PENDING) {
@@ -138,7 +150,7 @@ export class KycService {
     // Set user as verified + badge
     await this.usersService.verifyProfessional(submission.userId.toString());
 
-    return submission;
+    return this.toResponse(submission);
   }
 
   // Admin: reject
@@ -146,7 +158,7 @@ export class KycService {
     submissionId: string,
     adminId: string,
     reason: string,
-  ): Promise<KycSubmission> {
+  ): Promise<KycResponse> {
     const submission = await this.kycModel.findById(submissionId);
     if (!submission) throw new NotFoundException('Submission not found');
     if (submission.status !== KycStatus.PENDING) {
@@ -159,6 +171,6 @@ export class KycService {
     submission.rejectionReason = reason;
     await submission.save();
 
-    return submission;
+    return this.toResponse(submission);
   }
 }

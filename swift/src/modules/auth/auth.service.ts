@@ -7,6 +7,7 @@ import {
 import { InjectModel } from '@nestjs/mongoose';
 import { Model } from 'mongoose';
 import * as bcrypt from 'bcrypt';
+import { createHash, randomInt, timingSafeEqual } from 'crypto';
 import { User } from '../users/users.schema';
 import { RegisterDto } from './register.dto';
 import { LoginDto } from './login.dto';
@@ -16,6 +17,13 @@ import { OAuth2Client } from 'google-auth-library';
 import { GoogleLoginDto } from './google-login.dto';
 import { Otp } from './otp.schema';
 import { VerifyOtpDto } from './verify-otp.dto';
+import { ResetPasswordDto } from './reset-password.dto';
+
+const RESET_CODE_TTL_MINUTES = 15;
+const MAX_RESET_ATTEMPTS = 5;
+
+const generateCode = (): string => randomInt(100000, 1000000).toString();
+const hashCode = (code: string): Buffer => createHash('sha256').update(code).digest();
 
 @Injectable()
 export class AuthService {
@@ -60,9 +68,14 @@ export class AuthService {
       const payload = ticket.getPayload();
       if (!payload || !payload.email)
         throw new UnauthorizedException('Invalid Google token payload');
-      const { email, name } = payload;
+      const { email, name, picture } = payload;
 
       let user = await this.userModel.findOne({ email });
+      if (user && !user.avatar && picture) {
+        // Existing account without a picture: adopt the Google one
+        user.avatar = picture;
+        await user.save();
+      }
       const t2 = Date.now();
       console.log(`[googleLogin] findOne: ${t2 - t1}ms`);
 
@@ -81,6 +94,7 @@ export class AuthService {
           role: role || 'seeker',
           isVerified: true,
           location: formattedLocation,
+          ...(picture ? { avatar: picture } : {}),
         });
         await user.save();
         const t3 = Date.now();
@@ -182,19 +196,108 @@ export class AuthService {
   }
 
   async sendOtp(phoneOrEmail: string): Promise<{ message: string }> {
-    const code = Math.floor(100000 + Math.random() * 900000).toString();
+    const code = generateCode();
 
     const expiresAt = new Date();
     expiresAt.setMinutes(expiresAt.getMinutes() + 5);
 
-    // Mongoose update option clean up: use returnDocument instead of 'new' to clear deprecation warning
     await this.otpModel.findOneAndUpdate(
-      { phoneOrEmail },
-      { code, expiresAt },
+      { phoneOrEmail, purpose: 'verify' },
+      { code, expiresAt, attempts: 0 },
       { upsert: true, returnDocument: 'after' },
     );
 
-    //
+    await this.sendEmail(
+      phoneOrEmail,
+      'Verify Your Artiz Account',
+      `
+            <div style="font-family: sans-serif; padding: 20px; border: 1px solid #eee; border-radius: 5px;">
+              <h2>Welcome to Artiz!</h2>
+              <p>Use the following verification code to confirm your email address. It will expire in 5 minutes:</p>
+              <h1 style="color: #4F46E5; letter-spacing: 4px; font-size: 32px;">${code}</h1>
+              <p style="font-size: 12px; color: #666;">If you didn't create an account, please ignore this email.</p>
+            </div>
+          `,
+    );
+
+    return { message: 'Verification OTP code dispatched successfully.' };
+  }
+
+  // Always returns the same message so the endpoint can't be used to discover accounts.
+  async forgotPassword(email: string): Promise<{ message: string }> {
+    const response = {
+      message: 'If an account exists for this email, a password reset code has been sent.',
+    };
+
+    const user = await this.userModel.findOne({ email }).select('_id').exec();
+    if (!user) return response;
+
+    const code = generateCode();
+    const expiresAt = new Date(Date.now() + RESET_CODE_TTL_MINUTES * 60_000);
+    await this.otpModel.findOneAndUpdate(
+      { phoneOrEmail: email, purpose: 'reset' },
+      { code: hashCode(code).toString('hex'), expiresAt, attempts: 0 },
+      { upsert: true },
+    );
+
+    await this.sendEmail(
+      email,
+      'Reset Your Artiz Password',
+      `
+            <div style="font-family: sans-serif; padding: 20px; border: 1px solid #eee; border-radius: 5px;">
+              <h2>Password reset</h2>
+              <p>Use this code to reset your Artiz password. It will expire in ${RESET_CODE_TTL_MINUTES} minutes:</p>
+              <h1 style="color: #4F46E5; letter-spacing: 4px; font-size: 32px;">${code}</h1>
+              <p style="font-size: 12px; color: #666;">If you didn't request a password reset, you can ignore this email — your password won't change.</p>
+            </div>
+          `,
+    );
+
+    return response;
+  }
+
+  async resetPassword(dto: ResetPasswordDto): Promise<{ message: string }> {
+    const { email, code, newPassword } = dto;
+    const invalid = new BadRequestException('Invalid or expired reset code.');
+
+    // Count the attempt atomically BEFORE comparing, so parallel guesses
+    // can't slip past the limit.
+    const record = await this.otpModel
+      .findOneAndUpdate(
+        { phoneOrEmail: email, purpose: 'reset', expiresAt: { $gt: new Date() } },
+        { $inc: { attempts: 1 } },
+        { new: true },
+      )
+      .exec();
+    if (!record) throw invalid;
+    if (record.attempts > MAX_RESET_ATTEMPTS) {
+      await this.otpModel.deleteOne({ _id: record._id });
+      throw invalid;
+    }
+
+    const expected = Buffer.from(record.code, 'hex');
+    const given = hashCode(code);
+    if (expected.length !== given.length || !timingSafeEqual(expected, given)) {
+      throw invalid;
+    }
+
+    // Single use: only the request that deletes the code may change the password.
+    const consumed = await this.otpModel.deleteOne({ _id: record._id });
+    if (consumed.deletedCount === 0) throw invalid;
+
+    const passwordHash = await bcrypt.hash(newPassword, 10);
+    // Receiving the code proves ownership of the email, so this also verifies
+    // the account (and lets Google-only users set a password).
+    const result = await this.userModel.updateOne(
+      { email },
+      { $set: { passwordHash, isVerified: true } },
+    );
+    if (result.matchedCount === 0) throw invalid;
+
+    return { message: 'Password has been reset. You can now log in.' };
+  }
+
+  private async sendEmail(to: string, subject: string, htmlContent: string): Promise<void> {
     const brevoApiKey = this.configService.get<string>('BREVO_API_KEY');
     const senderEmail = this.configService.get<string>('OTP_SENDER_EMAIL');
 
@@ -202,9 +305,7 @@ export class AuthService {
       console.error(
         ' Brevo delivery skipped: BREVO_API_KEY or OTP_SENDER_EMAIL environment variable is missing.',
       );
-      throw new BadRequestException(
-        'Unable to send verification email. Please try again later.',
-      );
+      throw new BadRequestException('Unable to send email. Please try again later.');
     }
 
     try {
@@ -217,16 +318,9 @@ export class AuthService {
         },
         body: JSON.stringify({
           sender: { name: 'ARTIZ', email: senderEmail },
-          to: [{ email: phoneOrEmail }],
-          subject: 'Verify Your Artiz Account',
-          htmlContent: `
-            <div style="font-family: sans-serif; padding: 20px; border: 1px solid #eee; border-radius: 5px;">
-              <h2>Welcome to Artiz!</h2>
-              <p>Use the following verification code to confirm your email address. It will expire in 5 minutes:</p>
-              <h1 style="color: #4F46E5; letter-spacing: 4px; font-size: 32px;">${code}</h1>
-              <p style="font-size: 12px; color: #666;">If you didn't create an account, please ignore this email.</p>
-            </div>
-          `,
+          to: [{ email: to }],
+          subject,
+          htmlContent,
         }),
       });
 
@@ -235,25 +329,24 @@ export class AuthService {
         throw new Error(JSON.stringify(errorData));
       }
 
-      console.log(
-        `✓ Verification email sent successfully via Brevo HTTP to ${phoneOrEmail}`,
-      );
+      console.log(`✓ Email "${subject}" sent via Brevo HTTP to ${to}`);
     } catch (error) {
       // Log it internally, but do NOT claim success to the client when delivery failed.
       console.error('❌ Brevo HTTP email delivery failed:', error);
-      throw new BadRequestException(
-        'Failed to send verification email. Please try again later.',
-      );
+      throw new BadRequestException('Failed to send email. Please try again later.');
     }
-
-    return { message: 'Verification OTP code dispatched successfully.' };
   }
 
   async verifyOtp(verifyOtpDto: VerifyOtpDto): Promise<{ message: string }> {
     const { phoneOrEmail, code } = verifyOtpDto;
 
     // Search for the matching active code parameter
-    const record = await this.otpModel.findOne({ phoneOrEmail, code });
+    // Legacy records have no purpose; reset codes must never verify via this path
+    const record = await this.otpModel.findOne({
+      phoneOrEmail,
+      code,
+      purpose: { $ne: 'reset' },
+    });
     if (!record) {
       throw new BadRequestException(
         'Invalid verification code or code expired.',

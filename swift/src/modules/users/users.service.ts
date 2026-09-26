@@ -6,6 +6,7 @@ import { User } from './users.schema';
 import { CreateUserDto } from './dto/create-user.dto';
 import { UpdateUserDto } from './dto/update-user.dto';
 import { SearchProvidersDto } from './dto/search-providers.dto';
+import { CloudinaryService } from '../../common/cloudinary/cloudinary.service';
 
 // Fields other users must never see. Use for every response that exposes a user
 // who is not the caller (profiles, search, populated bookings, chat partners).
@@ -13,7 +14,10 @@ export const PUBLIC_USER_PROJECTION = '-passwordHash -phone -bankDetails';
 
 @Injectable()
 export class UsersService {
-  constructor(@InjectModel(User.name) private userModel: Model<User>) {}
+  constructor(
+    @InjectModel(User.name) private userModel: Model<User>,
+    private cloudinaryService: CloudinaryService,
+  ) {}
 
   async create(dto: CreateUserDto): Promise<User> {
     const existing = await this.userModel.findOne({
@@ -89,6 +93,25 @@ export class UsersService {
       .select('-passwordHash')
       .exec();
 
+    if (!user) throw new NotFoundException('User not found');
+    return user;
+  }
+
+  // Upload a new profile picture (public; one per user, overwritten on change)
+  async updateAvatar(id: string, image: Buffer): Promise<User> {
+    const result = await this.cloudinaryService.upload(image, {
+      folder: 'swift/avatars',
+      public_id: id,
+      overwrite: true,
+      invalidate: true,
+      resource_type: 'image',
+      transformation: [{ width: 512, height: 512, crop: 'fill', gravity: 'face' }],
+    });
+    // secure_url contains the version, so clients' caches refresh on change
+    const user = await this.userModel
+      .findByIdAndUpdate(id, { $set: { avatar: result.secure_url } }, { new: true })
+      .select('-passwordHash')
+      .exec();
     if (!user) throw new NotFoundException('User not found');
     return user;
   }

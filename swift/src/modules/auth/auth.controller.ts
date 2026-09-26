@@ -5,6 +5,7 @@ import { LoginDto } from './login.dto';
 import { User } from '../users/users.schema';
 import { GoogleLoginDto } from './google-login.dto';
 import { VerifyOtpDto } from './verify-otp.dto';
+import { ForgotPasswordDto, ResetPasswordDto } from './reset-password.dto';
 import { IsEmail, IsNotEmpty, IsString } from 'class-validator';
 import { Throttle } from '@nestjs/throttler';
 
@@ -49,5 +50,19 @@ export class AuthController {
     @Body(new ValidationPipe({ whitelist: true })) dto: ResendOtpDto,
   ): Promise<{ message: string }> {
     return this.authService.sendOtp(dto.email);
+  }
+
+  @Post('forgot-password')
+  @HttpCode(HttpStatus.OK)
+  @Throttle({ default: { limit: 3, ttl: 60_000 } }) // email-sending abuse prevention
+  async forgotPassword(@Body() dto: ForgotPasswordDto): Promise<{ message: string }> {
+    return this.authService.forgotPassword(dto.email);
+  }
+
+  @Post('reset-password')
+  @HttpCode(HttpStatus.OK)
+  @Throttle({ default: { limit: 5, ttl: 60_000 } }) // guess-limiting (plus per-code attempt cap)
+  async resetPassword(@Body() dto: ResetPasswordDto): Promise<{ message: string }> {
+    return this.authService.resetPassword(dto);
   }
 }

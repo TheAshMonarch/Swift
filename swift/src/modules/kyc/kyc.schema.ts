@@ -15,6 +15,19 @@ export enum IdType {
   DRIVERS_LICENSE = 'drivers_license',
 }
 
+@Schema({ _id: false })
+export class StoredFile {
+  @Prop({ type: String, required: true })
+  publicId!: string;
+
+  @Prop({ type: String, required: true })
+  resourceType!: string;
+
+  @Prop({ type: String, required: true })
+  format!: string;
+}
+const StoredFileSchema = SchemaFactory.createForClass(StoredFile);
+
 @Schema({ timestamps: true })
 export class KycSubmission extends Document {
   @Prop({ type: Types.ObjectId, ref: 'User', required: true, unique: true })
@@ -26,14 +39,26 @@ export class KycSubmission extends Document {
   @Prop({ type: String, enum: IdType, required: true })
   idType!: string;
 
-  @Prop({ type: String, required: true })
-  idImageUrl!: string; // Cloudinary URL of government ID
+  // Private Cloudinary files (type 'authenticated'). Clients never see these;
+  // KycService.toResponse() turns them into short-lived signed URLs.
+  @Prop({ type: StoredFileSchema })
+  idImageFile?: StoredFile; // government ID
 
-  @Prop({ type: String, required: true })
-  selfieUrl!: string; // Cloudinary URL of selfie
+  @Prop({ type: StoredFileSchema })
+  selfieFile?: StoredFile;
 
-  @Prop({ type: [String], default: [] })
-  portfolioUrls: string[] = []; // certificates, work samples
+  @Prop({ type: [StoredFileSchema], default: [] })
+  portfolioFiles: StoredFile[] = []; // certificates, work samples
+
+  // LEGACY: public URLs from submissions made before files became private
+  @Prop({ type: String })
+  idImageUrl?: string;
+
+  @Prop({ type: String })
+  selfieUrl?: string;
+
+  @Prop({ type: [String], default: undefined })
+  portfolioUrls?: string[];
 
   @Prop({ type: Types.ObjectId, ref: 'User' })
   reviewedBy?: Types.ObjectId; // admin who approved/rejected

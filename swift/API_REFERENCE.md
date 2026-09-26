@@ -1,6 +1,6 @@
 # Swift / Artiz Backend — API Reference for Frontend
 
-Derived directly from the source of `TheAshMonarch/Swift` (commit `f664f3d`, NestJS 11 + Mongoose 9). If the backend changes, re-check the controllers in `swift/src/modules/*/*.controller.ts`.
+Derived directly from the source of `TheAshMonarch/Swift` (branch `backend-fixes`, NestJS 11 + Mongoose 9). If the backend changes, re-check the controllers in `swift/src/modules/*/*.controller.ts`.
 
 ---
 
@@ -12,7 +12,7 @@ Derived directly from the source of `TheAshMonarch/Swift` (commit `f664f3d`, Nes
 | Global prefix | none (routes start at `/auth`, `/users`, …) |
 | Auth | `Authorization: Bearer <accessToken>` (JWT, expires in **7 days**, no refresh endpoint) |
 | JWT payload | `{ sub: userId, email, role }` |
-| Content type | `application/json` (except KYC upload: `multipart/form-data`) |
+| Content type | `application/json` (except KYC and avatar uploads: `multipart/form-data`) |
 | CORS | only the origin in `FRONTEND_URL` is allowed; credentials enabled |
 | Validation | unknown body fields are **rejected** (`forbidNonWhitelisted`) → 400. Send only documented fields. |
 | IDs | MongoDB ObjectId strings. Every document has `_id`, `__v`, `createdAt`, `updatedAt` (ISO strings). |
@@ -40,6 +40,8 @@ Derived directly from the source of `TheAshMonarch/Swift` (commit `f664f3d`, Nes
 | `POST /auth/login` | 10 / min |
 | `POST /auth/verify-otp` | 5 / min |
 | `POST /auth/resend-otp` | 3 / min |
+| `POST /auth/forgot-password` | 3 / min |
+| `POST /auth/reset-password` | 5 / min |
 
 ---
 
@@ -84,7 +86,7 @@ interface User {
   location: GeoPoint;
   proProfile?: ProfessionalProfile; // only professionals (Google-created pros have none!)
   bankDetails?: BankDetails;
-  avatar?: string;          // URL; currently only set by the seed script
+  avatar?: string;          // public image URL (upload via POST /users/me/avatar; Google users get their Google photo)
   googleId?: string;
   lastLogin?: string;
   createdAt: string;
@@ -155,12 +157,12 @@ type IdType = 'nin' | 'voters_card' | 'passport' | 'drivers_license';
 
 interface KycSubmission {
   _id: string;
-  userId: string | User;       // populated in admin lists
+  userId: string | Omit<User, 'bankDetails'>; // populated in admin lists
   status: KycStatus;
   idType: IdType;
-  idImageUrl: string;
-  selfieUrl: string;
-  portfolioUrls: string[];
+  idImageUrl: string;       // SIGNED, EXPIRES ~15 min after the response — never store it
+  selfieUrl: string;        // SIGNED, same
+  portfolioUrls: string[];  // SIGNED, same
   reviewedBy?: string;
   reviewedAt?: string;
   rejectionReason?: string;
@@ -226,7 +228,23 @@ Errors: `401` "Invalid email or password", `401` "Please verify your email addre
 // response
 { message: "google login successful"; accessToken: string; user: User }
 ```
-Google-created users are auto-verified, have a placeholder `phone`, no `avatar`, and professionals have **no `proProfile`** → prompt them to complete their profile via `PUT /users/me`.
+Google-created users are auto-verified. They get a placeholder `phone` and their Google profile photo as `avatar`, and professionals have **no `proProfile`**, so prompt them to complete their profile via `PUT /users/me`. Google users have no password. They can set one through the forgot/reset password flow.
+
+#### 🔓 `POST /auth/forgot-password` → `200`
+```ts
+{ email: string }
+// response (ALWAYS the same, whether or not the account exists)
+{ message: "If an account exists for this email, a password reset code has been sent." }
+```
+Emails a 6-digit code valid for **15 minutes**. Requesting again replaces the previous code. `400` only if email delivery fails.
+
+#### 🔓 `POST /auth/reset-password` → `200`
+```ts
+{ email: string; code: string /* exactly 6 digits */; newPassword: string /* min 6 */ }
+// response
+{ message: "Password has been reset. You can now log in." }
+```
+Errors: `400` "Invalid or expired reset code." (wrong, expired, already used, or more than 5 wrong attempts). After 5 wrong attempts the code is destroyed and the user must request a new one. A successful reset also marks the account verified. It does **not** log the user in, so call `/auth/login` afterwards. Existing tokens stay valid until they expire.
 
 ### 3.1a Health — `/health`
 
@@ -249,6 +267,9 @@ All fields optional; nested objects are merged field-by-field.
 }
 ```
 Get valid `bankCode`/`bankName` values from `GET /payments/banks`.
+
+#### `POST /users/me/avatar` → `User` (updated)
+`multipart/form-data` with one file field **`avatar`**: JPEG / PNG / WebP, ≤ 5 MB. The server crops it to 512×512 (face-centred). The new `avatar` URL changes on every upload, so caches refresh. Errors: `400` wrong type / missing file / too large.
 
 #### `POST /users/search/providers` → `ProviderSearchResult[]`
 Only returns professionals with `isVerified && isActive`, sorted by `averageRating` desc.
@@ -288,8 +309,8 @@ No pagination.
 ```
 
 #### `GET /bookings/my-bookings` → `Booking[]` (newest first)
-- Professional token → bookings where they're the pro, `seekerId` populated with User.
-- Anyone else → bookings where they're the seeker, `professionalId` populated with User.
+- Professional token → bookings where they're the pro, `seekerId` populated with `PublicUser`.
+- Anyone else → bookings where they're the seeker, `professionalId` populated with `PublicUser`.
 
 #### `GET /bookings/:id` → `Booking`
 Both `seekerId` and `professionalId` are populated with `PublicUser`. Only the booking's seeker, its professional or an admin can read it; anyone else gets `403`. Admins also see `phone`.
@@ -336,7 +357,7 @@ pending / accepted ──cancel (seeker) | decline (pro)──► cancelled ─�
 **Payment flow for the frontend:**
 1. `POST /bookings/:id/fund` → open `paymentUrl` (browser / WebView).
 2. Paystack redirects to `PAYSTACK_CALLBACK_URL` (backend env var — point it at a frontend route).
-3. Funding is confirmed **only** by the webhook, asynchronously. On the callback page, poll `GET /bookings/my-bookings` until the booking's status is `funded`.
+3. Funding is confirmed **only** by the webhook, asynchronously. On the callback page, poll `GET /bookings/:id` (every 2–3 s, give up after ~1 min and show "payment processing") until the status is `funded`.
 4. Calling `/fund` again (e.g. the user closed the checkout tab) safely returns the same `paymentUrl`.
 
 Not implemented: auto-release after a timeout, and partial refunds or splits.
@@ -374,6 +395,8 @@ One entry per partner with the latest message. Not sorted by recency, no unread 
 | `idType` | text: `nin` \| `voters_card` \| `passport` \| `drivers_license` | yes |
 
 Files: JPEG / PNG / WebP / PDF, ≤5 MB each. Errors: `403` not a professional, `400` already pending/verified, bad type, missing file.
+
+**KYC files are private.** `idImageUrl`, `selfieUrl` and `portfolioUrls` in every KYC response are signed links that **expire about 15 minutes** after the response. Don't store or cache them. Re-fetch (`/kyc/status`, `/kyc/pending`, `/kyc/all`) when you need fresh links, e.g. when an admin opens a submission.
 
 #### `GET /kyc/status` → `KycSubmission` or **empty body** (never submitted) — treat empty as `'none'`.
 
@@ -432,7 +455,10 @@ Messages to offline users are saved and appear via REST; there's no push notific
 9. Emails are case-sensitive server-side — normalize to lowercase before sending.
 10. `phone` and `bankDetails` are only returned for the caller's own user (`/users/me`). Other users (search, bookings, chat partners, profiles) never include them.
 11. Ratings are per booking (`POST /bookings/:id/rating`), not per user.
+12. KYC file URLs expire after about 15 minutes, so re-fetch rather than cache them. Avatar URLs are public and permanent.
+13. Forgot password always returns the same success message. Don't read it as proof that the account exists.
+14. There is no admin sign-up. Admin accounts are created by setting `role: "admin"` directly in the database.
 
 ## 6. Missing endpoints the frontend will likely need
 
-Forgot/reset password, admin user management, avatar upload, and per-conversation unread counts. Plan UI around their absence or add them to the backend first.
+Admin user management (list/deactivate users), avatar removal, per-conversation unread counts, a refresh-token/logout endpoint, and pagination for bookings, conversations and search. Plan UI around their absence or add them to the backend first.

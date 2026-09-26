@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Swift (also branded "Artiz" in payment strings) is the NestJS 11 + Mongoose 9 backend for a Nigerian service marketplace. Seekers find, book and pay verified professionals, with the money held in escrow. The git root is the parent directory (`swifty/`). This `swift/` directory is the whole app.
 
-`API_REFERENCE (1).md` is the contract the frontend is built against. It documents request and response shapes, the booking state machine, the WebSocket events and known gaps. **When you change a controller, DTO, schema or response shape, update that file in the same change.** Section 6 of the reference lists the missing endpoints that are planned. `roadmap.txt` holds the original 4-week plan, which includes a matching module, Winston logging and a `@nestjs/terminus` health check.
+`API_REFERENCE.md` is the contract the frontend is built against. It documents request and response shapes, the booking state machine, the WebSocket events and known gaps. **When you change a controller, DTO, schema or response shape, update that file in the same change.** Section 6 of the reference lists the missing endpoints that are planned. `roadmap.txt` holds the original 4-week plan, which includes a matching module, Winston logging and a `@nestjs/terminus` health check.
 
 ## Commands
 
@@ -48,7 +48,9 @@ The app reads these env vars: `MONGODB_URI`, `JWT_SECRET` (the app refuses to bo
 
 **Chat.** A Socket.IO gateway on namespace `/chat` authenticates from `handshake.auth.token` (raw JWT, no `Bearer`) and silently disconnects clients whose token fails. It keeps an in-memory `userId → Set<socketId>` map, which means it only works on a single instance. Messages are persisted through `ChatService` and are also served over REST (`/chat/...`). `ChatModule` registers its own `JwtModule`.
 
-**KYC.** Professionals submit multipart uploads. Multer keeps files in memory, and they're uploaded to Cloudinary using the `'CLOUDINARY'` provider from `src/common/cloudinary`. Admin approval sets the user's `isBadgeVerified` and `isVerified`.
+**Files (Cloudinary).** `CloudinaryService` in `src/common/cloudinary` handles every upload, and Multer keeps uploads in memory. Avatars are public: one per user, `public_id` = userId, overwritten on each upload. KYC documents are uploaded as `type: 'authenticated'` and stored as `{ publicId, resourceType, format }` refs, never URLs. `KycService.toResponse()` turns those refs into signed download links that expire after 15 minutes, so every KYC response must go through it. Older submissions may still have public `idImageUrl`/`selfieUrl` values stored, and those pass through unchanged. Admin approval sets the user's `isBadgeVerified` and `isVerified`.
+
+**OTP codes.** One `Otp` collection serves both purposes. `purpose: 'verify'` holds email-verification codes in plain text with a 5-minute expiry. `purpose: 'reset'` holds password-reset codes as a SHA-256 hash, with a 15-minute expiry and an attempt count that's incremented atomically before comparing; the code is destroyed after 5 wrong guesses. `/auth/verify-otp` must never accept a `reset` code. All email goes through `AuthService.sendEmail`, which calls Brevo's HTTP API and needs `BREVO_API_KEY` plus `OTP_SENDER_EMAIL`.
 
 ## Gotchas
 
