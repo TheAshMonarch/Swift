@@ -78,4 +78,4 @@ export class UsersController {
   getStats(@Param('id', IsObjectIdPipe) id: string) {
     return this.usersService.getProviderStats(id);
   }
-}
+}

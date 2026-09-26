@@ -14,4 +14,4 @@ import { CloudinaryModule } from '../../common/cloudinary/cloudinary.module';
   controllers: [UsersController],
   exports: [UsersService, MongooseModule],
 })
-export class UsersModule {}
+export class UsersModule {}
