@@ -1,12 +1,16 @@
-import { Injectable, NotFoundException, BadRequestException, ForbiddenException } from '@nestjs/common';
+import { Injectable, NotFoundException, BadRequestException, ForbiddenException, ConflictException } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model, Types } from 'mongoose';
 import { Booking, BookingStatus } from './bookings.schema';
 import { PaymentsService } from '../payments/payments.service';
-import { UsersService } from '../users/users.service';
+import { UsersService, PUBLIC_USER_PROJECTION } from '../users/users.service';
 import { CreateBookingDto } from './dto/create-booking.dto';
 
 const COMMISSION_RATE = 0.10; // 10%
+// A /fund claim that never stored its checkout URL (crash mid-initialization)
+// can be re-claimed after this long.
+const FUNDING_INIT_STALE_MS = 60_000;
+const RATEABLE_STATUSES = [BookingStatus.COMPLETED, BookingStatus.RELEASED];
 
 @Injectable()
 export class BookingsService {
@@ -76,7 +80,9 @@ export class BookingsService {
     return updated;
   }
 
-  // Seeker initiates payment — returns Paystack checkout URL
+  // Seeker initiates payment — returns Paystack checkout URL.
+  // Idempotent: repeat calls return the same URL/reference, so a payment made
+  // through an earlier URL can never be orphaned by a newer reference.
   async initiateFunding(bookingId: string, seekerId: string): Promise<{ paymentUrl: string; reference: string }> {
     const booking = await this.findAndValidate(bookingId);
     if (booking.seekerId.toString() !== seekerId) {
@@ -85,21 +91,67 @@ export class BookingsService {
     if (booking.status !== BookingStatus.ACCEPTED) {
       throw new BadRequestException('Booking must be accepted before payment');
     }
+    if (booking.paystackReference && booking.paystackAuthorizationUrl) {
+      return { paymentUrl: booking.paystackAuthorizationUrl, reference: booking.paystackReference };
+    }
 
     const seeker = await this.usersService.findById(seekerId);
     if (!seeker) throw new NotFoundException('Seeker not found');
 
     const reference = this.paymentsService.generateReference('escrow');
 
-    const transaction = await this.paymentsService.initializeTransaction({
-      email: seeker.email,
-      amountKobo: booking.agreedAmount,
-      reference,
-      metadata: { bookingId, seekerId, type: 'escrow_funding' },
-    });
+    // Atomic claim: only one concurrent /fund call may initialize a transaction.
+    const claimed = await this.bookingModel
+      .findOneAndUpdate(
+        {
+          _id: booking._id,
+          status: BookingStatus.ACCEPTED,
+          paystackAuthorizationUrl: { $exists: false },
+          $or: [
+            { paystackReference: { $exists: false } },
+            { updatedAt: { $lt: new Date(Date.now() - FUNDING_INIT_STALE_MS) } },
+          ],
+        },
+        { $set: { paystackReference: reference } },
+        { new: true },
+      )
+      .exec();
+    if (!claimed) {
+      const fresh = await this.findAndValidate(bookingId);
+      if (fresh.paystackReference && fresh.paystackAuthorizationUrl) {
+        return { paymentUrl: fresh.paystackAuthorizationUrl, reference: fresh.paystackReference };
+      }
+      if (fresh.status !== BookingStatus.ACCEPTED) {
+        throw new BadRequestException('Booking must be accepted before payment');
+      }
+      throw new ConflictException('Payment is already being initialized, please retry shortly');
+    }
 
-    booking.paystackReference = reference;
-    await booking.save();
+    let transaction: { authorization_url: string };
+    try {
+      transaction = await this.paymentsService.initializeTransaction({
+        email: seeker.email,
+        amountKobo: booking.agreedAmount,
+        reference,
+        metadata: { bookingId, seekerId, type: 'escrow_funding' },
+      });
+    } catch (error) {
+      // Release the claim so the seeker can retry.
+      await this.bookingModel
+        .updateOne(
+          { _id: booking._id, paystackReference: reference },
+          { $unset: { paystackReference: 1 } },
+        )
+        .exec();
+      throw error;
+    }
+
+    await this.bookingModel
+      .updateOne(
+        { _id: booking._id, paystackReference: reference },
+        { $set: { paystackAuthorizationUrl: transaction.authorization_url } },
+      )
+      .exec();
 
     return { paymentUrl: transaction.authorization_url, reference };
   }
@@ -321,10 +373,49 @@ export class BookingsService {
     return claimed;
   }
 
+  // Seeker rates the professional — at most once per completed booking
+  async rate(bookingId: string, seekerId: string, rating: number): Promise<Booking> {
+    const booking = await this.findAndValidate(bookingId);
+    if (booking.seekerId.toString() !== seekerId) {
+      throw new ForbiddenException('Not your booking');
+    }
+
+    // Atomic claim: concurrent requests cannot both rate the same booking.
+    const claimed = await this.bookingModel
+      .findOneAndUpdate(
+        {
+          _id: booking._id,
+          status: { $in: RATEABLE_STATUSES },
+          rating: { $exists: false },
+        },
+        { $set: { rating, ratedAt: new Date() } },
+        { new: true },
+      )
+      .exec();
+    if (!claimed) {
+      throw new BadRequestException(
+        booking.rating !== undefined
+          ? 'This booking has already been rated'
+          : 'Only completed bookings can be rated',
+      );
+    }
+
+    try {
+      await this.usersService.addRating(booking.professionalId.toString(), rating);
+    } catch (error) {
+      // Undo the claim so the rating can be retried.
+      await this.bookingModel
+        .updateOne({ _id: booking._id }, { $unset: { rating: 1, ratedAt: 1 } })
+        .exec();
+      throw error;
+    }
+    return claimed;
+  }
+
   async findBySeeker(seekerId: string): Promise<Booking[]> {
     return this.bookingModel
       .find({ seekerId: new Types.ObjectId(seekerId) })
-      .populate('professionalId', '-passwordHash')
+      .populate('professionalId', PUBLIC_USER_PROJECTION)
       .sort({ createdAt: -1 })
       .exec();
   }
@@ -332,7 +423,7 @@ export class BookingsService {
   async findByProfessional(professionalId: string): Promise<Booking[]> {
     return this.bookingModel
       .find({ professionalId: new Types.ObjectId(professionalId) })
-      .populate('seekerId', '-passwordHash')
+      .populate('seekerId', PUBLIC_USER_PROJECTION)
       .sort({ createdAt: -1 })
       .exec();
   }

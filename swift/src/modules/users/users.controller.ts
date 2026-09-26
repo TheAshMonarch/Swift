@@ -4,14 +4,6 @@ import { UpdateUserDto } from './dto/update-user.dto';
 import { SearchProvidersDto } from './dto/search-providers.dto';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
 import { RolesGuard } from '../../common/guards/roles.guard';
-import { IsNumber, Min, Max } from 'class-validator';
-
-export class AddRatingDto {
-  @IsNumber()
-  @Min(1)
-  @Max(5)
-  rating!: number;
-}
 
 @Controller('users')
 @UseGuards(JwtAuthGuard, RolesGuard)
@@ -42,11 +34,7 @@ export class UsersController {
     });
   }
 
-  @Post(':id/rating')
-  addRating(@Param('id') id: string, @Body() dto: AddRatingDto) {
-    // TODO: restrict to users with a COMPLETED booking for this provider.
-    return this.usersService.addRating(id, dto.rating);
-  }
+  // Ratings live on bookings: POST /bookings/:id/rating (one per completed booking).
 
   @Get(':id/stats')
   getStats(@Param('id') id: string) {

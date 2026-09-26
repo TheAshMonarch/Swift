@@ -7,6 +7,10 @@ import { CreateUserDto } from './dto/create-user.dto';
 import { UpdateUserDto } from './dto/update-user.dto';
 import { SearchProvidersDto } from './dto/search-providers.dto';
 
+// Fields other users must never see. Use for every response that exposes a user
+// who is not the caller (profiles, search, populated bookings, chat partners).
+export const PUBLIC_USER_PROJECTION = '-passwordHash -phone -bankDetails';
+
 @Injectable()
 export class UsersService {
   constructor(@InjectModel(User.name) private userModel: Model<User>) {}
@@ -43,7 +47,7 @@ export class UsersService {
   async findPublicById(id: string | Types.ObjectId): Promise<User | null> {
     return this.userModel
       .findById(id)
-      .select('-passwordHash -bankDetails -phone')
+      .select(PUBLIC_USER_PROJECTION)
       .exec();
   }
 
@@ -157,7 +161,7 @@ export class UsersService {
 
     pipeline.push({ $sort: { 'proProfile.averageRating': -1 } });
     pipeline.push({ $limit: dto.limit ?? 20 });
-    pipeline.push({ $project: { passwordHash: 0 } });
+    pipeline.push({ $project: { passwordHash: 0, phone: 0, bankDetails: 0 } });
 
     return this.userModel.aggregate(pipeline).exec();
   }
@@ -197,7 +201,7 @@ export class UsersService {
           },
           { new: true },
         )
-        .select('-passwordHash')
+        .select(PUBLIC_USER_PROJECTION)
         .exec();
         
       attempts++;

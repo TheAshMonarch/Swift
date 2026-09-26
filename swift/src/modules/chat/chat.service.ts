@@ -82,7 +82,13 @@ export class ChatService {
         },
       },
       { $unwind: '$partner' },
-      { $project: { 'partner.passwordHash': 0 } },
+      {
+        $project: {
+          'partner.passwordHash': 0,
+          'partner.phone': 0,
+          'partner.bankDetails': 0,
+        },
+      },
     ]);
   }
 

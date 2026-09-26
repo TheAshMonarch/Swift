@@ -35,6 +35,9 @@ export class Booking extends Document {
   paystackReference?: string;   // used to verify payment
 
   @Prop({ type: String })
+  paystackAuthorizationUrl?: string; // checkout URL for paystackReference; reused on repeat /fund calls
+
+  @Prop({ type: String })
   paystackTransferCode?: string; // used to release payout
 
   // Swift's commission (e.g. 10%)
@@ -55,6 +58,13 @@ export class Booking extends Document {
 
   @Prop({ type: Date })
   releasedAt?: Date;
+
+  // Seeker's rating of the professional for this job (at most one per booking)
+  @Prop({ type: Number, min: 1, max: 5 })
+  rating?: number;
+
+  @Prop({ type: Date })
+  ratedAt?: Date;
 }
 
 export const BookingSchema = SchemaFactory.createForClass(Booking);

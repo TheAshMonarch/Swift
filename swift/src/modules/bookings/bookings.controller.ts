@@ -1,6 +1,7 @@
 import { Controller, Post, Put, Get, Body, Param, UseGuards, Req } from '@nestjs/common';
 import { BookingsService } from './bookings.service';
 import { CreateBookingDto } from './dto/create-booking.dto';
+import { RateBookingDto } from './dto/rate-booking.dto';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
 
 @Controller('bookings')
@@ -51,6 +52,12 @@ export class BookingsController {
   @UseGuards(JwtAuthGuard)
   raiseDispute(@Req() req: any, @Param('id') id: string, @Body('reason') reason: string) {
     return this.bookingsService.raiseDispute(id, req.user.userId, reason);
+  }
+
+  @Post(':id/rating')
+  @UseGuards(JwtAuthGuard)
+  rate(@Req() req: any, @Param('id') id: string, @Body() dto: RateBookingDto) {
+    return this.bookingsService.rate(id, req.user.userId, dto.rating);
   }
 
   @Get('my-bookings')
