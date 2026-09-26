@@ -23,13 +23,16 @@ export class BookingsService {
       throw new NotFoundException('Professional not found');
     }
 
+    // Round to integer kobo: avoid float artifacts like 0.29 * 100 = 28.9999…
+    const agreedAmount = Math.round(dto.agreedAmountNaira * 100);
+
     return this.bookingModel.create({
       seekerId: new Types.ObjectId(seekerId),
       professionalId: new Types.ObjectId(dto.professionalId),
       serviceDescription: dto.serviceDescription,
-      agreedAmount: dto.agreedAmountNaira * 100, // convert to kobo
-      commissionAmount: Math.round(dto.agreedAmountNaira * 100 * COMMISSION_RATE),
-      professionalPayout: Math.round(dto.agreedAmountNaira * 100 * (1 - COMMISSION_RATE)),
+      agreedAmount,
+      commissionAmount: Math.round(agreedAmount * COMMISSION_RATE),
+      professionalPayout: agreedAmount - Math.round(agreedAmount * COMMISSION_RATE),
     });
   }
 
@@ -39,11 +42,18 @@ export class BookingsService {
     if (booking.professionalId.toString() !== professionalId) {
       throw new ForbiddenException('Not your booking');
     }
-    if (booking.status !== BookingStatus.PENDING) {
+    // Atomic guard: only succeed if the booking is still pending (no read→save race)
+    const updated = await this.bookingModel
+      .findOneAndUpdate(
+        { _id: booking._id, status: BookingStatus.PENDING },
+        { $set: { status: BookingStatus.ACCEPTED } },
+        { new: true },
+      )
+      .exec();
+    if (!updated) {
       throw new BadRequestException('Booking is not pending');
     }
-    booking.status = BookingStatus.ACCEPTED;
-    return booking.save();
+    return updated;
   }
 
   // Professional starts the job
@@ -52,11 +62,18 @@ export class BookingsService {
     if (booking.professionalId.toString() !== professionalId) {
       throw new ForbiddenException('Not your booking');
     }
-    if (booking.status !== BookingStatus.FUNDED) {
+    // Atomic guard: only transition if currently FUNDED
+    const updated = await this.bookingModel
+      .findOneAndUpdate(
+        { _id: booking._id, status: BookingStatus.FUNDED },
+        { $set: { status: BookingStatus.IN_PROGRESS } },
+        { new: true },
+      )
+      .exec();
+    if (!updated) {
       throw new BadRequestException('Job can only be started after payment is confirmed');
     }
-    booking.status = BookingStatus.IN_PROGRESS;
-    return booking.save();
+    return updated;
   }
 
   // Seeker initiates payment — returns Paystack checkout URL
@@ -93,11 +110,41 @@ export class BookingsService {
     if (!booking) throw new NotFoundException('Booking not found for this reference');
     if (booking.status === BookingStatus.FUNDED) return booking; // idempotent
 
-    await this.paymentsService.verifyTransaction(reference);
+    const transaction = await this.paymentsService.verifyTransaction(reference);
 
-    booking.status = BookingStatus.FUNDED;
-    booking.fundedAt = new Date();
-    return booking.save();
+    // SECURITY: confirm the amount actually paid matches what the booking
+    // expects — otherwise a partial payment could unlock full escrow.
+    if (!transaction || typeof transaction.amount !== 'number') {
+      throw new BadRequestException('Invalid transaction response from payment provider');
+    }
+    if (transaction.amount !== booking.agreedAmount) {
+      throw new BadRequestException(
+        'Payment amount does not match the booking amount',
+      );
+    }
+
+    // Atomic guard: two concurrent webhooks must not both "fund" the booking.
+    const updated = await this.bookingModel
+      .findOneAndUpdate(
+        {
+          _id: booking._id,
+          status: { $in: [BookingStatus.ACCEPTED, BookingStatus.PENDING] },
+        },
+        {
+          $set: {
+            status: BookingStatus.FUNDED,
+            fundedAt: new Date(),
+          },
+        },
+        { new: true },
+      )
+      .exec();
+    if (!updated) {
+      // Someone else already transitioned it — treat as already handled.
+      const fresh = await this.bookingModel.findById(booking._id).exec();
+      return fresh!;
+    }
+    return updated;
   }
 
   // Professional marks job as complete
@@ -106,12 +153,26 @@ export class BookingsService {
     if (booking.professionalId.toString() !== professionalId) {
       throw new ForbiddenException('Not your booking');
     }
-    if (booking.status !== BookingStatus.FUNDED && booking.status !== BookingStatus.IN_PROGRESS) {
+    // Atomic guard: only transition if currently FUNDED or IN_PROGRESS
+    const updated = await this.bookingModel
+      .findOneAndUpdate(
+        {
+          _id: booking._id,
+          status: { $in: [BookingStatus.FUNDED, BookingStatus.IN_PROGRESS] },
+        },
+        {
+          $set: {
+            status: BookingStatus.COMPLETED,
+            completedAt: new Date(),
+          },
+        },
+        { new: true },
+      )
+      .exec();
+    if (!updated) {
       throw new BadRequestException('Job is not in a completable state');
     }
-    booking.status = BookingStatus.COMPLETED;
-    booking.completedAt = new Date();
-    return booking.save();
+    return updated;
   }
 
   // Seeker releases funds to professional
@@ -120,35 +181,77 @@ export class BookingsService {
     if (booking.seekerId.toString() !== seekerId) {
       throw new ForbiddenException('Not your booking');
     }
-    if (booking.status !== BookingStatus.COMPLETED) {
+
+    // Atomic guard FIRST: claim the transition to RELEASED before touching
+    // any money. A concurrent duplicate call now fails here instead of
+    // creating a second transfer with the same (deterministic) reference.
+    const claimed = await this.bookingModel
+      .findOneAndUpdate(
+        { _id: booking._id, status: BookingStatus.COMPLETED },
+        { $set: { status: BookingStatus.RELEASED, releasedAt: new Date() } },
+        { new: true },
+      )
+      .exec();
+    if (!claimed) {
       throw new BadRequestException('Job must be marked complete first');
     }
 
     const professional = await this.usersService.findById(booking.professionalId.toString());
     if (!professional?.bankDetails) {
+      // Roll the status back so the seeker can retry after the pro adds details.
+      await this.bookingModel
+        .findByIdAndUpdate(booking._id, {
+          $set: { status: BookingStatus.COMPLETED },
+          $unset: { releasedAt: 1 },
+        })
+        .exec();
       throw new BadRequestException('Professional has no bank details on file');
     }
 
-    // Create recipient and transfer
-    const recipient = await this.paymentsService.createTransferRecipient({
-      name: professional.name,
-      accountNumber: professional.bankDetails.accountNumber,
-      bankCode: professional.bankDetails.bankCode,
-    });
+    // Reuse the stored recipient code when possible; Paystack charges for
+    // recipient creation, and it is deterministic per bank account.
+    let recipientCode: string | undefined = professional.bankDetails?.recipientCode;
+    if (!recipientCode) {
+      const recipient = await this.paymentsService.createTransferRecipient({
+        name: professional.name,
+        accountNumber: professional.bankDetails.accountNumber,
+        bankCode: professional.bankDetails.bankCode,
+      });
+      if (!recipient?.recipient_code) {
+        throw new BadRequestException('Failed to create Paystack transfer recipient');
+      }
+      recipientCode = recipient.recipient_code;
+      await this.usersService.setTransferRecipient(
+        professional._id.toString(),
+        recipientCode as string,
+      );
+    }
 
     const payoutReference = `payout_${booking._id.toString()}`; // Deterministic reference
 
-    const transfer = await this.paymentsService.initiateTransfer({
-    amountKobo: booking.professionalPayout,
-    recipientCode: recipient.recipient_code,
-    reference: payoutReference, // Safe against retries
-    reason: `Artiz payout for booking ${bookingId}`,
-    });
+    try {
+      const transfer = await this.paymentsService.initiateTransfer({
+        amountKobo: booking.professionalPayout,
+        recipientCode: recipientCode as string,
+        reference: payoutReference, // Safe against retries
+        reason: `Artiz payout for booking ${bookingId}`,
+      });
 
-    booking.status = BookingStatus.RELEASED;
-    booking.paystackTransferCode = transfer.transfer_code;
-    booking.releasedAt = new Date();
-    await booking.save();
+      await this.bookingModel
+        .findByIdAndUpdate(booking._id, {
+          $set: { paystackTransferCode: transfer.transfer_code },
+        })
+        .exec();
+    } catch (error) {
+      // Transfer failed — roll the status back so it can be retried.
+      await this.bookingModel
+        .findByIdAndUpdate(booking._id, {
+          $set: { status: BookingStatus.COMPLETED },
+          $unset: { releasedAt: 1 },
+        })
+        .exec();
+      throw error;
+    }
 
     // Update professional stats
     await this.usersService.incrementCompletedJobs(
@@ -156,7 +259,7 @@ export class BookingsService {
       booking.professionalPayout / 100, // back to naira
     );
 
-    return booking;
+    return this.bookingModel.findById(booking._id).exec().then((b) => b!);
   }
 
   // Seeker raises a dispute
@@ -165,29 +268,57 @@ export class BookingsService {
     if (booking.seekerId.toString() !== seekerId) {
       throw new ForbiddenException('Not your booking');
     }
-    if (![BookingStatus.FUNDED, BookingStatus.COMPLETED, BookingStatus.IN_PROGRESS].includes(booking.status)) {
+    // Atomic guard: only disputable from these three states
+    const updated = await this.bookingModel
+      .findOneAndUpdate(
+        {
+          _id: booking._id,
+          status: {
+            $in: [
+              BookingStatus.FUNDED,
+              BookingStatus.COMPLETED,
+              BookingStatus.IN_PROGRESS,
+            ],
+          },
+        },
+        {
+          $set: {
+            status: BookingStatus.DISPUTED,
+            disputeReason: reason,
+          },
+        },
+        { new: true },
+      )
+      .exec();
+    if (!updated) {
       throw new BadRequestException('Cannot dispute at this stage');
     }
-    booking.status = BookingStatus.DISPUTED;
-    booking.disputeReason = reason;
-    return booking.save();
+    return updated;
   }
 
   // Admin resolves dispute with refund
   async processRefund(bookingId: string): Promise<Booking> {
     const booking = await this.findAndValidate(bookingId);
-    if (booking.status !== BookingStatus.DISPUTED) {
-      throw new BadRequestException('Booking is not in disputed state');
-    }
     if (!booking.paystackReference) {
       throw new BadRequestException('No payment reference found');
+    }
+
+    // Atomically claim the transition to REFUNDED before contacting Paystack.
+    const claimed = await this.bookingModel
+      .findOneAndUpdate(
+        { _id: booking._id, status: BookingStatus.DISPUTED },
+        { $set: { status: BookingStatus.REFUNDED } },
+        { new: true },
+      )
+      .exec();
+    if (!claimed) {
+      throw new BadRequestException('Booking is not in disputed state');
     }
 
     const transaction = await this.paymentsService.verifyTransaction(booking.paystackReference);
     await this.paymentsService.refundTransaction(transaction.id, booking.agreedAmount);
 
-    booking.status = BookingStatus.REFUNDED;
-    return booking.save();
+    return claimed;
   }
 
   async findBySeeker(seekerId: string): Promise<Booking[]> {

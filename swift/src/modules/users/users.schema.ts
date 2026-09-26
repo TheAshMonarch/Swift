@@ -79,8 +79,16 @@ export class User extends Document {
   @Prop({ type: Boolean, default: true })
   isActive: boolean = true;
 
-  @Prop({ type: { accountNumber: String, bankCode: String, bankName: String }, required: false })
-  bankDetails?: { accountNumber: string; bankCode: string; bankName: string };
+  @Prop({
+    type: { accountNumber: String, bankCode: String, bankName: String, recipientCode: String },
+    required: false,
+  })
+  bankDetails?: {
+    accountNumber: string;
+    bankCode: string;
+    bankName: string;
+    recipientCode?: string; // cached Paystack transfer recipient
+  };
 }
 
 export const UserSchema = SchemaFactory.createForClass(User);

@@ -39,6 +39,14 @@ export class UsersService {
     return this.userModel.findById(id).select('-passwordHash').exec();
   }
 
+  // Public-safe projection: never expose phone, bank details, or hashes to other users.
+  async findPublicById(id: string | Types.ObjectId): Promise<User | null> {
+    return this.userModel
+      .findById(id)
+      .select('-passwordHash -bankDetails -phone')
+      .exec();
+  }
+
   // FIXED: Flattens objects into MongoDB dot notation format to prevent overwriting nested fields
   async update(id: string, dto: UpdateUserDto): Promise<User> {
     const updateQuery: any = {};
@@ -47,6 +55,11 @@ export class UsersService {
     if (dto.phone) updateQuery.phone = dto.phone;
 
     if (dto.location?.coordinates) {
+      // Validate coordinates are [longitude, latitude] tuple of numbers
+      if (!Array.isArray(dto.location.coordinates) || dto.location.coordinates.length !== 2 ||
+          !dto.location.coordinates.every(c => typeof c === 'number')) {
+        throw new BadRequestException('Invalid coordinates: must be [longitude, latitude]');
+      }
       updateQuery['location.coordinates'] = dto.location.coordinates;
     }
 
@@ -54,6 +67,17 @@ export class UsersService {
       if (dto.proProfile.category) updateQuery['proProfile.category'] = dto.proProfile.category;
       if (dto.proProfile.skills) updateQuery['proProfile.skills'] = dto.proProfile.skills;
       if (dto.proProfile.hourlyRate !== undefined) updateQuery['proProfile.hourlyRate'] = dto.proProfile.hourlyRate;
+    }
+
+    // FIXED: bankDetails were previously accepted by the DTO but silently
+    // dropped here — which made escrow payouts impossible. Persist them.
+    if (dto.bankDetails) {
+      updateQuery['bankDetails.accountNumber'] = dto.bankDetails.accountNumber;
+      updateQuery['bankDetails.bankCode'] = dto.bankDetails.bankCode;
+      updateQuery['bankDetails.bankName'] = dto.bankDetails.bankName;
+      // Changing bank account invalidates any cached Paystack recipient.
+      if (!updateQuery.$unset) updateQuery.$unset = {};
+      updateQuery.$unset['bankDetails.recipientCode'] = 1;
     }
 
     const user = await this.userModel
@@ -141,6 +165,12 @@ export class UsersService {
   // FIXED: Uses findOneAndUpdate with conditional criteria matching original read values 
   // to avoid concurrent overwrite race conditions
   async addRating(providerId: string, rating: number): Promise<User> {
+    // Validate here as well as the DTO: this service method is reachable
+    // from multiple call sites and the raw controller body bypasses nothing.
+    if (!Number.isFinite(rating) || rating < 1 || rating > 5) {
+      throw new BadRequestException('Rating must be between 1 and 5');
+    }
+
     let updated: User | null = null;
     let attempts = 0;
 
@@ -208,6 +238,15 @@ export class UsersService {
       .exec();
     if (!user) throw new NotFoundException('User not found');
     return user;
+  }
+
+  // Cache a Paystack transfer recipient code on the professional's record
+  async setTransferRecipient(id: string, recipientCode: string): Promise<void> {
+    await this.userModel
+      .findByIdAndUpdate(id, {
+        $set: { 'bankDetails.recipientCode': recipientCode },
+      })
+      .exec();
   }
 
   async deactivateUser(id: string): Promise<User> {

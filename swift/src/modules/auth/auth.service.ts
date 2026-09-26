@@ -136,7 +136,7 @@ export class AuthService {
       phone,
       passwordHash,
       location: formattedLocation,
-      verified: false,
+      isVerified: false,
     });
 
     const savedUser = await newUser.save();
@@ -196,14 +196,15 @@ export class AuthService {
 
     //
     const brevoApiKey = this.configService.get<string>('BREVO_API_KEY');
+    const senderEmail = this.configService.get<string>('OTP_SENDER_EMAIL');
 
-    if (!brevoApiKey) {
+    if (!brevoApiKey || !senderEmail) {
       console.error(
-        ' Brevo delivery skipped: BREVO_API_KEY environment variable is missing.',
+        ' Brevo delivery skipped: BREVO_API_KEY or OTP_SENDER_EMAIL environment variable is missing.',
       );
-      return {
-        message: 'Verification OTP code generated (Email config missing).',
-      };
+      throw new BadRequestException(
+        'Unable to send verification email. Please try again later.',
+      );
     }
 
     try {
@@ -215,7 +216,7 @@ export class AuthService {
           'content-type': 'application/json',
         },
         body: JSON.stringify({
-          sender: { name: 'ARTIZ', email: 'rhemaamasi12@gmail.com' },
+          sender: { name: 'ARTIZ', email: senderEmail },
           to: [{ email: phoneOrEmail }],
           subject: 'Verify Your Artiz Account',
           htmlContent: `
@@ -238,8 +239,11 @@ export class AuthService {
         `✓ Verification email sent successfully via Brevo HTTP to ${phoneOrEmail}`,
       );
     } catch (error) {
-      // Log it internally so your server keeps running smoothly even if an API issue happens
+      // Log it internally, but do NOT claim success to the client when delivery failed.
       console.error('❌ Brevo HTTP email delivery failed:', error);
+      throw new BadRequestException(
+        'Failed to send verification email. Please try again later.',
+      );
     }
 
     return { message: 'Verification OTP code dispatched successfully.' };
@@ -262,11 +266,15 @@ export class AuthService {
       throw new BadRequestException('Verification code has expired.');
     }
 
-    // Set user account to verified inside your database
-    await this.userModel.updateOne(
+    // SECURITY: only mark the account verified if an actual user exists for
+    // this OTP target — otherwise anyone could "verify" arbitrary emails.
+    const result = await this.userModel.updateOne(
       { $or: [{ email: phoneOrEmail }, { phone: phoneOrEmail }] },
       { isVerified: true },
     );
+    if (result.matchedCount === 0) {
+      throw new BadRequestException('No account found for this contact.');
+    }
 
     // Remove the OTP record since it has served its purpose
     await this.otpModel.deleteOne({ _id: record._id });

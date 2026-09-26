@@ -7,7 +7,7 @@ import {
 import { InjectModel } from '@nestjs/mongoose';
 import { Model, Types } from 'mongoose';
 import { v2 as cloudinary } from 'cloudinary';
-import { KycSubmission, KycStatus } from './kyc.schema';
+import { KycSubmission, KycStatus, IdType } from './kyc.schema';
 import { UsersService } from '../users/users.service';
 
 @Injectable()
@@ -34,7 +34,7 @@ export class KycService {
 
   async submitKyc(
     userId: string,
-    idType: string,
+    rawIdType: string,
     files: {
       idImage: Express.Multer.File;
       selfie: Express.Multer.File;
@@ -47,6 +47,12 @@ export class KycService {
     if (user.role !== 'professional') {
       throw new ForbiddenException('Only professionals can submit KYC');
     }
+
+    // Whitelist the ID type before persisting or uploading anything.
+    if (!Object.values(IdType).includes(rawIdType as IdType)) {
+      throw new BadRequestException('Invalid ID type');
+    }
+    const idType = rawIdType as IdType;
 
     // Check if already submitted
     const existing = await this.kycModel.findOne({

@@ -6,11 +6,12 @@ RUN npm ci
 COPY . .
 RUN npm run build
 
-# Stage 2: Run only the compiled output
+# Stage 2: Run only the compiled output with production dependencies
 FROM node:20-alpine
 WORKDIR /app
-COPY --from=builder /app/dist ./dist
-COPY --from=builder /app/node_modules ./node_modules
+ENV NODE_ENV=production
 COPY package*.json ./
-EXPOSE 3000
+RUN npm ci --omit=dev && npm cache clean --force
+COPY --from=builder /app/dist ./dist
+EXPOSE 8080
 CMD ["node", "dist/main.js"]

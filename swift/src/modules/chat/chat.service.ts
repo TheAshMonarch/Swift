@@ -21,17 +21,32 @@ export class ChatService {
     });
   }
 
-  async getConversation(userAId: string, userBId: string): Promise<Message[]> {
-    return this.messageModel
-      .find({
-        $or: [
-          { senderId: userAId, receiverId: userBId },
-          { senderId: userBId, receiverId: userAId },
-        ],
-      })
-      .sort({ createdAt: 1 })
+  async getConversation(
+    userAId: string,
+    userBId: string,
+    options?: { limit?: number; before?: number },
+  ): Promise<Message[]> {
+    const limit = Math.min(Math.max(options?.limit ?? 50, 1), 100);
+
+    const filter: Record<string, unknown> = {
+      $or: [
+        { senderId: userAId, receiverId: userBId },
+        { senderId: userBId, receiverId: userAId },
+      ],
+    };
+    // Cursor pagination: only messages strictly older than the cursor.
+    if (options?.before !== undefined) {
+      filter.createdAt = { $lt: new Date(options.before) };
+    }
+
+    // Newest page first, then reversed so the page reads chronologically.
+    const docs = await this.messageModel
+      .find(filter)
+      .sort({ createdAt: -1 })
+      .limit(limit)
       .populate('senderId', 'name avatar')
       .exec();
+    return docs.reverse();
   }
 
   async getMyConversations(userId: string): Promise<any[]> {

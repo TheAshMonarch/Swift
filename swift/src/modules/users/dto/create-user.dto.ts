@@ -36,7 +36,8 @@ export class CreateUserDto {
 	@IsNotEmpty()
 	phone!: string;
 
-	@IsEnum(['seeker', 'professional', 'admin'])
+	// SECURITY: 'admin' must never be creatable through normal service entry points.
+	@IsEnum(['seeker', 'professional'])
 	role!: string;
 
 	@ValidateNested()

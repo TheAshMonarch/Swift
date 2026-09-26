@@ -8,6 +8,7 @@ import {
   HttpStatus,
 } from '@nestjs/common';
 import { Request } from 'express';
+import { SkipThrottle } from '@nestjs/throttler';
 import { PaymentsService } from './payments.service';
 import { BookingsService } from '../bookings/bookings.service';
 
@@ -20,6 +21,7 @@ export class PaymentsController {
 
   @Post('webhook')
   @HttpCode(HttpStatus.OK)
+  @SkipThrottle() // Paystack retries must never be rate-limited
   async handleWebhook(
     @Headers('x-paystack-signature') signature: string,
     @Req() req: Request & { rawBody?: Buffer },

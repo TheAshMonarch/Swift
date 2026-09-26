@@ -44,8 +44,9 @@ export class RegisterDto {
   @IsNotEmpty()
   phone!: string;
 
-  // Required data from client -> Use '!'
-  @IsEnum(['seeker', 'professional', 'admin'])
+  // SECURITY: 'admin' must never be registrable from the public API.
+  // Admin accounts are provisioned directly in the database / via seed script.
+  @IsEnum(['seeker', 'professional'])
   role!: string;
 
   // Required data from client -> Use '!'

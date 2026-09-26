@@ -25,11 +25,9 @@ export class BookingsController {
     return this.bookingsService.initiateFunding(id, req.user.userId);
   }
 
-  // FIXED: Removed JwtAuthGuard from this route so Paystack webhooks/callbacks can access it
-  @Post('confirm-payment')
-  confirmPayment(@Body('reference') reference: string) {
-    return this.bookingsService.confirmFunding(reference);
-  }
+  // SECURITY: funding confirmation is handled exclusively by the
+  // signature-verified Paystack webhook (POST /payments/webhook).
+  // The previously public /bookings/confirm-payment endpoint was removed.
 
   @Put(':id/complete')
   @UseGuards(JwtAuthGuard)
