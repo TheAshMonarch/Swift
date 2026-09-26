@@ -43,7 +43,8 @@ The app reads these env vars: `MONGODB_URI`, `JWT_SECRET` (the app refuses to bo
 - Every state transition is an atomic `findOneAndUpdate` filtered on the expected current status. There are no read-then-save transitions and no Mongo transactions.
 - `releaseFunds` claims the `released` status *before* calling Paystack and rolls it back to `completed` if the transfer fails. Payout references are deterministic (`payout_<bookingId>`), which makes retries idempotent.
 - The move to `funded` happens only in the webhook (`POST /payments/webhook` → `confirmFunding`). That path verifies the HMAC signature, re-verifies the transaction with Paystack, and checks that the amount paid equals `agreedAmount`.
-- `processRefund` exists, but no controller exposes it yet.
+- Every payout (a seeker's release, or an admin's `resolve` with `release`) goes through `payOutProfessional(booking, rollback)`. The caller claims `released` first, and the helper applies the rollback update on any failure before the transfer succeeds.
+- If a payment arrives for a `cancelled` booking, `confirmFunding` refunds it automatically. Cancel and decline are only allowed from `pending` or `accepted`.
 
 **Chat.** A Socket.IO gateway on namespace `/chat` authenticates from `handshake.auth.token` (raw JWT, no `Bearer`) and silently disconnects clients whose token fails. It keeps an in-memory `userId → Set<socketId>` map, which means it only works on a single instance. Messages are persisted through `ChatService` and are also served over REST (`/chat/...`). `ChatModule` registers its own `JwtModule`.
 

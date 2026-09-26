@@ -1,6 +1,8 @@
 import {
   Controller,
   Post,
+  Get,
+  UseGuards,
   Headers,
   Req,
   BadRequestException,
@@ -11,6 +13,7 @@ import { Request } from 'express';
 import { SkipThrottle } from '@nestjs/throttler';
 import { PaymentsService } from './payments.service';
 import { BookingsService } from '../bookings/bookings.service';
+import { JwtAuthGuard } from '../auth/jwt-auth.guard';
 
 @Controller('payments')
 export class PaymentsController {
@@ -18,6 +21,13 @@ export class PaymentsController {
     private paymentsService: PaymentsService,
     private bookingsService: BookingsService,
   ) {}
+
+  // Bank list for the payout-details form (bankCode goes into PUT /users/me)
+  @Get('banks')
+  @UseGuards(JwtAuthGuard)
+  getBanks() {
+    return this.paymentsService.getBanks();
+  }
 
   @Post('webhook')
   @HttpCode(HttpStatus.OK)

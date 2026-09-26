@@ -1,4 +1,10 @@
-import { IsString, IsNotEmpty, IsNumber, Min, IsMongoId } from 'class-validator';
+import {
+  IsString,
+  IsNotEmpty,
+  IsNumber,
+  Min,
+  IsMongoId,
+} from 'class-validator';
 
 export class CreateBookingDto {
   @IsMongoId()

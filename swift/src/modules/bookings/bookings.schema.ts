@@ -59,6 +59,26 @@ export class Booking extends Document {
   @Prop({ type: Date })
   releasedAt?: Date;
 
+  // Set when the seeker cancels or the professional declines before funding
+  @Prop({ type: String, enum: ['seeker', 'professional'] })
+  cancelledBy?: 'seeker' | 'professional';
+
+  @Prop({ type: String })
+  cancellationReason?: string;
+
+  @Prop({ type: Date })
+  cancelledAt?: Date;
+
+  // Admin dispute resolution
+  @Prop({ type: String, enum: ['refund', 'release'] })
+  disputeResolution?: 'refund' | 'release';
+
+  @Prop({ type: Types.ObjectId, ref: 'User' })
+  resolvedBy?: Types.ObjectId;
+
+  @Prop({ type: Date })
+  resolvedAt?: Date;
+
   // Seeker's rating of the professional for this job (at most one per booking)
   @Prop({ type: Number, min: 1, max: 5 })
   rating?: number;

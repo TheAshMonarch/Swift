@@ -3,7 +3,11 @@ import { IsObjectIdPipe } from '@nestjs/mongoose';
 import { BookingsService } from './bookings.service';
 import { CreateBookingDto } from './dto/create-booking.dto';
 import { RateBookingDto } from './dto/rate-booking.dto';
+import { CancelBookingDto } from './dto/cancel-booking.dto';
+import { ResolveDisputeDto } from './dto/resolve-dispute.dto';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
+import { RolesGuard } from '../../common/guards/roles.guard';
+import { Roles } from '../../common/decorators/roles.decorator';
 
 @Controller('bookings')
 export class BookingsController {
@@ -61,6 +65,25 @@ export class BookingsController {
     return this.bookingsService.rate(id, req.user.userId, dto.rating);
   }
 
+  @Put(':id/cancel')
+  @UseGuards(JwtAuthGuard)
+  cancel(@Req() req: any, @Param('id', IsObjectIdPipe) id: string, @Body() dto: CancelBookingDto) {
+    return this.bookingsService.cancel(id, req.user.userId, dto.reason);
+  }
+
+  @Put(':id/decline')
+  @UseGuards(JwtAuthGuard)
+  decline(@Req() req: any, @Param('id', IsObjectIdPipe) id: string, @Body() dto: CancelBookingDto) {
+    return this.bookingsService.decline(id, req.user.userId, dto.reason);
+  }
+
+  @Put(':id/resolve')
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles('admin')
+  resolveDispute(@Req() req: any, @Param('id', IsObjectIdPipe) id: string, @Body() dto: ResolveDisputeDto) {
+    return this.bookingsService.resolveDispute(id, req.user.userId, dto.outcome);
+  }
+
   @Get('my-bookings')
   @UseGuards(JwtAuthGuard)
   getMyBookings(@Req() req: any) {
@@ -68,5 +91,19 @@ export class BookingsController {
     return role === 'professional'
       ? this.bookingsService.findByProfessional(userId)
       : this.bookingsService.findBySeeker(userId);
+  }
+
+  @Get('disputed')
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles('admin')
+  getDisputed() {
+    return this.bookingsService.findDisputed();
+  }
+
+  // Declared after the static GET routes above so it doesn't shadow them
+  @Get(':id')
+  @UseGuards(JwtAuthGuard)
+  findOne(@Req() req: any, @Param('id', IsObjectIdPipe) id: string) {
+    return this.bookingsService.findOneForUser(id, req.user.userId, req.user.role);
   }
 }

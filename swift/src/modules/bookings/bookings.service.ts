@@ -1,4 +1,4 @@
-import { Injectable, NotFoundException, BadRequestException, ForbiddenException, ConflictException } from '@nestjs/common';
+import { Injectable, Logger, NotFoundException, BadRequestException, ForbiddenException, ConflictException } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model, Types } from 'mongoose';
 import { Booking, BookingStatus } from './bookings.schema';
@@ -11,9 +11,17 @@ const COMMISSION_RATE = 0.10; // 10%
 // can be re-claimed after this long.
 const FUNDING_INIT_STALE_MS = 60_000;
 const RATEABLE_STATUSES = [BookingStatus.COMPLETED, BookingStatus.RELEASED];
+// Bookings can be cancelled/declined only before money is involved.
+const CANCELLABLE_STATUSES = [BookingStatus.PENDING, BookingStatus.ACCEPTED];
+// Admins may see contact details (phone) to mediate disputes, never bank details.
+const ADMIN_USER_PROJECTION = '-passwordHash -bankDetails';
+
+export type DisputeOutcome = 'refund' | 'release';
 
 @Injectable()
 export class BookingsService {
+  private readonly logger = new Logger(BookingsService.name);
+
   constructor(
     @InjectModel(Booking.name) private bookingModel: Model<Booking>,
     private paymentsService: PaymentsService,
@@ -192,11 +200,41 @@ export class BookingsService {
       )
       .exec();
     if (!updated) {
-      // Someone else already transitioned it — treat as already handled.
       const fresh = await this.bookingModel.findById(booking._id).exec();
+      if (fresh?.status === BookingStatus.CANCELLED) {
+        // Paid through a checkout link after the booking was cancelled.
+        return this.refundCancelledPayment(fresh, transaction.id);
+      }
+      // Someone else already transitioned it — treat as already handled.
       return fresh!;
     }
     return updated;
+  }
+
+  // Money arrived for a cancelled booking: send it straight back.
+  // Throws on failure so the webhook returns non-2xx and Paystack retries.
+  private async refundCancelledPayment(booking: Booking, transactionId: string): Promise<Booking> {
+    const claimed = await this.bookingModel
+      .findOneAndUpdate(
+        { _id: booking._id, status: BookingStatus.CANCELLED },
+        { $set: { status: BookingStatus.REFUNDED } },
+        { new: true },
+      )
+      .exec();
+    if (!claimed) {
+      return (await this.bookingModel.findById(booking._id).exec())!;
+    }
+    try {
+      await this.paymentsService.refundTransaction(transactionId, booking.agreedAmount);
+    } catch (error) {
+      await this.bookingModel
+        .updateOne({ _id: booking._id }, { $set: { status: BookingStatus.CANCELLED } })
+        .exec();
+      this.logger.error(`Auto-refund failed for cancelled booking ${booking._id.toString()}`);
+      throw error;
+    }
+    this.logger.warn(`Refunded payment received for cancelled booking ${booking._id.toString()}`);
+    return claimed;
   }
 
   // Professional marks job as complete
@@ -248,69 +286,10 @@ export class BookingsService {
       throw new BadRequestException('Job must be marked complete first');
     }
 
-    const professional = await this.usersService.findById(booking.professionalId.toString());
-    if (!professional?.bankDetails) {
-      // Roll the status back so the seeker can retry after the pro adds details.
-      await this.bookingModel
-        .findByIdAndUpdate(booking._id, {
-          $set: { status: BookingStatus.COMPLETED },
-          $unset: { releasedAt: 1 },
-        })
-        .exec();
-      throw new BadRequestException('Professional has no bank details on file');
-    }
-
-    // Reuse the stored recipient code when possible; Paystack charges for
-    // recipient creation, and it is deterministic per bank account.
-    let recipientCode: string | undefined = professional.bankDetails?.recipientCode;
-    if (!recipientCode) {
-      const recipient = await this.paymentsService.createTransferRecipient({
-        name: professional.name,
-        accountNumber: professional.bankDetails.accountNumber,
-        bankCode: professional.bankDetails.bankCode,
-      });
-      if (!recipient?.recipient_code) {
-        throw new BadRequestException('Failed to create Paystack transfer recipient');
-      }
-      recipientCode = recipient.recipient_code;
-      await this.usersService.setTransferRecipient(
-        professional._id.toString(),
-        recipientCode as string,
-      );
-    }
-
-    const payoutReference = `payout_${booking._id.toString()}`; // Deterministic reference
-
-    try {
-      const transfer = await this.paymentsService.initiateTransfer({
-        amountKobo: booking.professionalPayout,
-        recipientCode: recipientCode as string,
-        reference: payoutReference, // Safe against retries
-        reason: `Artiz payout for booking ${bookingId}`,
-      });
-
-      await this.bookingModel
-        .findByIdAndUpdate(booking._id, {
-          $set: { paystackTransferCode: transfer.transfer_code },
-        })
-        .exec();
-    } catch (error) {
-      // Transfer failed — roll the status back so it can be retried.
-      await this.bookingModel
-        .findByIdAndUpdate(booking._id, {
-          $set: { status: BookingStatus.COMPLETED },
-          $unset: { releasedAt: 1 },
-        })
-        .exec();
-      throw error;
-    }
-
-    // Update professional stats
-    await this.usersService.incrementCompletedJobs(
-      booking.professionalId.toString(),
-      booking.professionalPayout / 100, // back to naira
-    );
-
+    await this.payOutProfessional(booking, {
+      $set: { status: BookingStatus.COMPLETED },
+      $unset: { releasedAt: 1 },
+    });
     return this.bookingModel.findById(booking._id).exec().then((b) => b!);
   }
 
@@ -348,18 +327,80 @@ export class BookingsService {
     return updated;
   }
 
-  // Admin resolves dispute with refund
-  async processRefund(bookingId: string): Promise<Booking> {
+  // Seeker cancels before funding
+  async cancel(bookingId: string, seekerId: string, reason?: string): Promise<Booking> {
     const booking = await this.findAndValidate(bookingId);
-    if (!booking.paystackReference) {
+    if (booking.seekerId.toString() !== seekerId) {
+      throw new ForbiddenException('Not your booking');
+    }
+    return this.cancelBeforeFunding(booking, 'seeker', reason);
+  }
+
+  // Professional declines (or withdraws) before funding
+  async decline(bookingId: string, professionalId: string, reason?: string): Promise<Booking> {
+    const booking = await this.findAndValidate(bookingId);
+    if (booking.professionalId.toString() !== professionalId) {
+      throw new ForbiddenException('Not your booking');
+    }
+    return this.cancelBeforeFunding(booking, 'professional', reason);
+  }
+
+  private async cancelBeforeFunding(
+    booking: Booking,
+    cancelledBy: 'seeker' | 'professional',
+    reason?: string,
+  ): Promise<Booking> {
+    // If the seeker still pays an outstanding checkout link, confirmFunding
+    // sees CANCELLED and refunds automatically.
+    const updated = await this.bookingModel
+      .findOneAndUpdate(
+        { _id: booking._id, status: { $in: CANCELLABLE_STATUSES } },
+        {
+          $set: {
+            status: BookingStatus.CANCELLED,
+            cancelledBy,
+            cancelledAt: new Date(),
+            ...(reason ? { cancellationReason: reason } : {}),
+          },
+        },
+        { new: true },
+      )
+      .exec();
+    if (!updated) {
+      throw new BadRequestException('Only pending or accepted bookings can be cancelled');
+    }
+    return updated;
+  }
+
+  // Admin resolves a dispute: refund the seeker or release funds to the professional
+  async resolveDispute(bookingId: string, adminId: string, outcome: DisputeOutcome): Promise<Booking> {
+    const booking = await this.findAndValidate(bookingId);
+    if (outcome === 'refund' && !booking.paystackReference) {
       throw new BadRequestException('No payment reference found');
     }
 
-    // Atomically claim the transition to REFUNDED before contacting Paystack.
+    const resolution = {
+      disputeResolution: outcome,
+      resolvedBy: new Types.ObjectId(adminId),
+      resolvedAt: new Date(),
+    };
+    const rollback = {
+      $set: { status: BookingStatus.DISPUTED },
+      $unset: { disputeResolution: 1, resolvedBy: 1, resolvedAt: 1, releasedAt: 1 },
+    };
+
+    // Atomically claim the final state before contacting Paystack.
     const claimed = await this.bookingModel
       .findOneAndUpdate(
         { _id: booking._id, status: BookingStatus.DISPUTED },
-        { $set: { status: BookingStatus.REFUNDED } },
+        {
+          $set: {
+            ...resolution,
+            ...(outcome === 'refund'
+              ? { status: BookingStatus.REFUNDED }
+              : { status: BookingStatus.RELEASED, releasedAt: new Date() }),
+          },
+        },
         { new: true },
       )
       .exec();
@@ -367,10 +408,67 @@ export class BookingsService {
       throw new BadRequestException('Booking is not in disputed state');
     }
 
-    const transaction = await this.paymentsService.verifyTransaction(booking.paystackReference);
-    await this.paymentsService.refundTransaction(transaction.id, booking.agreedAmount);
+    if (outcome === 'release') {
+      await this.payOutProfessional(booking, rollback);
+    } else {
+      try {
+        const transaction = await this.paymentsService.verifyTransaction(booking.paystackReference!);
+        await this.paymentsService.refundTransaction(transaction.id, booking.agreedAmount);
+      } catch (error) {
+        await this.bookingModel.findByIdAndUpdate(booking._id, rollback).exec();
+        throw error;
+      }
+    }
+    return this.bookingModel.findById(booking._id).exec().then((b) => b!);
+  }
 
-    return claimed;
+  // Transfers professionalPayout to the pro's bank account and updates their stats.
+  // The caller must already have claimed the RELEASED status; on any failure
+  // before the transfer succeeds, `rollback` is applied and the error rethrown.
+  private async payOutProfessional(booking: Booking, rollback: Record<string, unknown>): Promise<void> {
+    try {
+      const professional = await this.usersService.findById(booking.professionalId.toString());
+      if (!professional?.bankDetails) {
+        throw new BadRequestException('Professional has no bank details on file');
+      }
+
+      // Reuse the stored recipient code when possible; Paystack charges for
+      // recipient creation, and it is deterministic per bank account.
+      let recipientCode: string | undefined = professional.bankDetails.recipientCode;
+      if (!recipientCode) {
+        const recipient = await this.paymentsService.createTransferRecipient({
+          name: professional.name,
+          accountNumber: professional.bankDetails.accountNumber,
+          bankCode: professional.bankDetails.bankCode,
+        });
+        if (!recipient?.recipient_code) {
+          throw new BadRequestException('Failed to create Paystack transfer recipient');
+        }
+        recipientCode = recipient.recipient_code as string;
+        await this.usersService.setTransferRecipient(professional._id.toString(), recipientCode);
+      }
+
+      const transfer = await this.paymentsService.initiateTransfer({
+        amountKobo: booking.professionalPayout,
+        recipientCode,
+        reference: `payout_${booking._id.toString()}`, // Deterministic: safe against retries
+        reason: `Artiz payout for booking ${booking._id.toString()}`,
+      });
+
+      await this.bookingModel
+        .findByIdAndUpdate(booking._id, {
+          $set: { paystackTransferCode: transfer.transfer_code },
+        })
+        .exec();
+    } catch (error) {
+      await this.bookingModel.findByIdAndUpdate(booking._id, rollback).exec();
+      throw error;
+    }
+
+    await this.usersService.incrementCompletedJobs(
+      booking.professionalId.toString(),
+      booking.professionalPayout / 100, // back to naira
+    );
   }
 
   // Seeker rates the professional — at most once per completed booking
@@ -425,6 +523,36 @@ export class BookingsService {
       .find({ professionalId: new Types.ObjectId(professionalId) })
       .populate('seekerId', PUBLIC_USER_PROJECTION)
       .sort({ createdAt: -1 })
+      .exec();
+  }
+
+  // Single booking for a participant (or an admin), with both parties populated
+  async findOneForUser(bookingId: string, userId: string, role: string): Promise<Booking> {
+    const isAdmin = role === 'admin';
+    const projection = isAdmin ? ADMIN_USER_PROJECTION : PUBLIC_USER_PROJECTION;
+    const booking = await this.bookingModel
+      .findById(bookingId)
+      .populate('seekerId', projection)
+      .populate('professionalId', projection)
+      .exec();
+    if (!booking) throw new NotFoundException('Booking not found');
+
+    const isParticipant = [booking.seekerId, booking.professionalId].some(
+      (party) => party?._id?.toString() === userId,
+    );
+    if (!isParticipant && !isAdmin) {
+      throw new ForbiddenException('Not your booking');
+    }
+    return booking;
+  }
+
+  // Admin queue: disputed bookings, oldest first
+  async findDisputed(): Promise<Booking[]> {
+    return this.bookingModel
+      .find({ status: BookingStatus.DISPUTED })
+      .populate('seekerId', ADMIN_USER_PROJECTION)
+      .populate('professionalId', ADMIN_USER_PROJECTION)
+      .sort({ updatedAt: 1 })
       .exec();
   }
 

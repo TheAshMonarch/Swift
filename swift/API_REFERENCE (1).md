@@ -121,6 +121,12 @@ interface Booking {
   releasedAt?: string;
   rating?: number;                // 1–5, set once via POST /bookings/:id/rating
   ratedAt?: string;
+  cancelledBy?: 'seeker' | 'professional';
+  cancellationReason?: string;
+  cancelledAt?: string;
+  disputeResolution?: 'refund' | 'release'; // set by an admin via PUT /bookings/:id/resolve
+  resolvedBy?: string;            // admin user id
+  resolvedAt?: string;
   createdAt: string;
   updatedAt: string;
   __v: number;
@@ -242,7 +248,7 @@ All fields optional; nested objects are merged field-by-field.
   bankDetails?: { accountNumber: string; bankCode: string; bankName: string }; // all 3 required if sent
 }
 ```
-⚠️ There is no endpoint to list banks / bank codes yet (`PaymentsService.getBanks()` exists but isn't exposed).
+Get valid `bankCode`/`bankName` values from `GET /payments/banks`.
 
 #### `POST /users/search/providers` → `ProviderSearchResult[]`
 Only returns professionals with `isVerified && isActive`, sorted by `averageRating` desc.
@@ -285,7 +291,11 @@ No pagination.
 - Professional token → bookings where they're the pro, `seekerId` populated with User.
 - Anyone else → bookings where they're the seeker, `professionalId` populated with User.
 
-⚠️ There is **no `GET /bookings/:id`**. Get a single booking from the list or from the action responses.
+#### `GET /bookings/:id` → `Booking`
+Both `seekerId` and `professionalId` are populated with `PublicUser`. Only the booking's seeker, its professional or an admin can read it; anyone else gets `403`. Admins also see `phone`.
+
+#### 👑 `GET /bookings/disputed` → `Booking[]`
+All `disputed` bookings, oldest first, with both parties populated (including `phone`, never `bankDetails`).
 
 #### State transitions
 
@@ -298,9 +308,16 @@ No pagination.
 | `/bookings/:id/complete` | PUT | professional | `funded` \| `in_progress` → `completed` | `Booking` |
 | `/bookings/:id/release` | PUT | seeker | `completed` → `released` (triggers payout) | `Booking` |
 | `/bookings/:id/dispute` | PUT | seeker | `funded` \| `in_progress` \| `completed` → `disputed` | `Booking` |
+| `/bookings/:id/cancel` | PUT | seeker | `pending` \| `accepted` → `cancelled` | `Booking` |
+| `/bookings/:id/decline` | PUT | professional | `pending` \| `accepted` → `cancelled` | `Booking` |
+| `/bookings/:id/resolve` | PUT | 👑 admin | `disputed` → `refunded` \| `released` | `Booking` |
 | `/bookings/:id/rating` | **POST** | seeker | must be `completed` \| `released`, not yet rated (status unchanged) | `201 Booking` (with `rating`) |
 
 `dispute` body: `{ reason: string }` (not validated server-side — validate client-side).
+
+`cancel` / `decline` body (optional): `{ reason?: string }` (max 500 chars). Once a booking is funded it can't be cancelled; the seeker has to raise a dispute instead. If the seeker pays an old checkout link after cancelling, the payment is **refunded automatically** and the booking ends up `refunded`.
+
+`resolve` body: `{ outcome: 'refund' | 'release' }`. `refund` returns the full `agreedAmount` to the seeker. `release` pays `professionalPayout` to the professional, who needs `bankDetails` on file. If Paystack fails, the booking stays `disputed` so the admin can retry.
 
 `rating` body: `{ rating: number }` (1–5). One rating per booking. It updates the professional's `averageRating`/`reviewCount`. A second attempt returns `400` "This booking has already been rated".
 
@@ -312,7 +329,8 @@ Errors: `403` "Not your booking", `400` wrong state (e.g. "Booking is not pendin
 pending ──accept──► accepted ──(pay via paymentUrl, webhook)──► funded ──start──► in_progress
                                                                    │                  │
                                                                    └──────complete────┴──► completed ──release──► released
-                          funded / in_progress / completed ──dispute──► disputed ──(admin refund: NOT EXPOSED)──► refunded
+                          funded / in_progress / completed ──dispute──► disputed ──resolve (admin)──► refunded | released
+pending / accepted ──cancel (seeker) | decline (pro)──► cancelled ──(late payment auto-refunded)──► refunded
 ```
 
 **Payment flow for the frontend:**
@@ -321,9 +339,12 @@ pending ──accept──► accepted ──(pay via paymentUrl, webhook)──
 3. Funding is confirmed **only** by the webhook, asynchronously. On the callback page, poll `GET /bookings/my-bookings` until the booking's status is `funded`.
 4. Calling `/fund` again (e.g. the user closed the checkout tab) safely returns the same `paymentUrl`.
 
-Not implemented: cancel, decline, reject, admin dispute resolution/refund, auto-release.
+Not implemented: auto-release after a timeout, and partial refunds or splits.
 
 ### 3.4 Payments — `/payments`
+
+#### 🔒 `GET /payments/banks` → `{ name: string; code: string }[]`
+Nigerian banks sorted by name, for the payout form. Send the chosen `code` and `name` as `bankDetails.bankCode` and `bankDetails.bankName` in `PUT /users/me`. The server caches this for 24 h.
 
 `POST /payments/webhook` — **Paystack only**, signature-verified. Never call from the frontend.
 
@@ -414,4 +435,4 @@ Messages to offline users are saved and appear via REST; there's no push notific
 
 ## 6. Missing endpoints the frontend will likely need
 
-`GET /bookings/:id`, booking cancel/decline, `GET /payments/banks` (bank list for payout setup), forgot/reset password, admin dispute resolution/refund, admin user management, avatar upload, and per-conversation unread counts. Plan UI around their absence or add them to the backend first.
+Forgot/reset password, admin user management, avatar upload, and per-conversation unread counts. Plan UI around their absence or add them to the backend first.

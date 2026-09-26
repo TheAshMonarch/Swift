@@ -3,10 +3,23 @@ import { ConfigService } from '@nestjs/config';
 import axios from 'axios';
 import * as crypto from 'crypto';
 
+export interface Bank {
+  name: string;
+  code: string;
+}
+
+interface PaystackBankPage {
+  data?: { name: string; code: string; active?: boolean; is_deleted?: boolean }[];
+  meta?: { next?: string | null };
+}
+
+const BANKS_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
+
 @Injectable()
 export class PaymentsService {
   private readonly baseUrl = 'https://api.paystack.co';
   private readonly headers: Record<string, string>;
+  private banksCache?: { expiresAt: number; banks: Promise<Bank[]> };
 
   constructor(private config: ConfigService) {
     this.headers = {
@@ -94,12 +107,36 @@ export class PaymentsService {
     return data.data;
   }
 
-  async getBanks() {
-    const { data } = await axios.get(
-      `${this.baseUrl}/bank?currency=NGN`,
-      { headers: this.headers },
-    );
-    return data.data;
+  // Nigerian banks for payout setup, cached in memory (the list rarely changes).
+  // Caches the in-flight promise so concurrent callers share one Paystack fetch.
+  async getBanks(): Promise<Bank[]> {
+    if (this.banksCache && this.banksCache.expiresAt > Date.now()) {
+      return this.banksCache.banks;
+    }
+    const banks = this.fetchBanks();
+    this.banksCache = { expiresAt: Date.now() + BANKS_CACHE_TTL_MS, banks };
+    banks.catch(() => (this.banksCache = undefined)); // don't cache failures
+    return banks;
+  }
+
+  private async fetchBanks(): Promise<Bank[]> {
+    const banks: Bank[] = [];
+    let next: string | null = null;
+    // Paystack paginates by cursor; guard against an endless loop.
+    for (let page = 0; page < 20; page++) {
+      const { data }: { data: PaystackBankPage } = await axios.get(`${this.baseUrl}/bank`, {
+        headers: this.headers,
+        params: { currency: 'NGN', use_cursor: true, perPage: 100, ...(next ? { next } : {}) },
+      });
+      for (const bank of data.data ?? []) {
+        if (bank.active !== false && !bank.is_deleted) {
+          banks.push({ name: bank.name, code: bank.code });
+        }
+      }
+      next = data.meta?.next ?? null;
+      if (!next) break;
+    }
+    return banks.sort((a, b) => a.name.localeCompare(b.name));
   }
 
   generateReference(prefix = 'artiz'): string {
