@@ -59,3 +59,32 @@ describe('PaymentsService.getBanks', () => {
     ]);
   });
 });
+
+describe('PaymentsService callback URL', () => {
+  const make = (env: Record<string, string | undefined>) =>
+    new PaymentsService({ get: (k: string) => env[k] } as unknown as ConfigService);
+
+  it('uses a valid PAYSTACK_CALLBACK_URL as-is', () => {
+    expect(make({ PAYSTACK_CALLBACK_URL: 'https://app.example.com/pay/done' }).callbackUrl).toBe(
+      'https://app.example.com/pay/done',
+    );
+  });
+
+  it('falls back to FRONTEND_URL when the configured value is malformed', () => {
+    const svc = make({
+      PAYSTACK_CALLBACK_URL: 'PAYSTACK_CALLBACK_URL=https://old.ngrok.dev/x',
+      FRONTEND_URL: 'https://artiz.example.com',
+    });
+    expect(svc.callbackUrl).toBe('https://artiz.example.com/dashboard/bookings/payment-callback');
+  });
+
+  it('falls back to FRONTEND_URL when unset', () => {
+    expect(make({ FRONTEND_URL: 'https://artiz.example.com/' }).callbackUrl).toBe(
+      'https://artiz.example.com/dashboard/bookings/payment-callback',
+    );
+  });
+
+  it('is undefined when nothing usable is configured', () => {
+    expect(make({}).callbackUrl).toBeUndefined();
+  });
+});

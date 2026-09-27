@@ -1,4 +1,4 @@
-import { Injectable, BadRequestException } from '@nestjs/common';
+import { Injectable, BadRequestException, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import axios from 'axios';
 import * as crypto from 'crypto';
@@ -15,17 +15,51 @@ interface PaystackBankPage {
 
 const BANKS_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 
+// Frontend page that waits for the webhook to confirm payment.
+export const PAYMENT_CALLBACK_PATH = '/dashboard/bookings/payment-callback';
+
+const asHttpUrl = (value?: string): string | undefined => {
+  if (!value) return undefined;
+  try {
+    const url = new URL(value.trim());
+    return url.protocol === 'https:' || url.protocol === 'http:' ? url.toString() : undefined;
+  } catch {
+    return undefined;
+  }
+};
+
 @Injectable()
 export class PaymentsService {
   private readonly baseUrl = 'https://api.paystack.co';
   private readonly headers: Record<string, string>;
   private banksCache?: { expiresAt: number; banks: Promise<Bank[]> };
+  private readonly logger = new Logger(PaymentsService.name);
+  readonly callbackUrl?: string;
 
   constructor(private config: ConfigService) {
     this.headers = {
       Authorization: `Bearer ${this.config.get<string>('PAYSTACK_SECRET_KEY')}`,
       'Content-Type': 'application/json',
     };
+    this.callbackUrl = this.resolveCallbackUrl();
+  }
+
+  // Where Paystack sends the customer after checkout. Paystack silently
+  // ignores an invalid callback_url and leaves the customer on its own
+  // success page, so fall back to FRONTEND_URL + the callback page.
+  private resolveCallbackUrl(): string | undefined {
+    const configured = this.config.get<string>('PAYSTACK_CALLBACK_URL');
+    const valid = asHttpUrl(configured);
+    if (valid) return valid;
+
+    const frontend = asHttpUrl(this.config.get<string>('FRONTEND_URL'));
+    const fallback = frontend ? new URL(PAYMENT_CALLBACK_PATH, frontend).toString() : undefined;
+    if (configured) {
+      this.logger.warn(`PAYSTACK_CALLBACK_URL is not a valid URL; using ${fallback ?? 'the Paystack dashboard default'}`);
+    } else if (!fallback) {
+      this.logger.warn('No PAYSTACK_CALLBACK_URL or FRONTEND_URL: customers will stay on Paystack after paying');
+    }
+    return fallback;
   }
 
   async initializeTransaction(params: {
@@ -41,7 +75,7 @@ export class PaymentsService {
         amount: params.amountKobo,
         reference: params.reference,
         metadata: params.metadata,
-        callback_url: this.config.get<string>('PAYSTACK_CALLBACK_URL'),
+        callback_url: this.callbackUrl,
       },
       { headers: this.headers },
     );
