@@ -34,6 +34,11 @@ export class CloudinaryService {
     });
   }
 
+  // Delete a public file (e.g. a removed work photo).
+  async destroy(publicId: string): Promise<void> {
+    await cloudinary.uploader.destroy(publicId, { invalidate: true });
+  }
+
   // Upload a sensitive document (ID, selfie). Only reachable via signedUrl().
   async uploadPrivate(buffer: Buffer, folder: string): Promise<PrivateFile> {
     const result = await this.upload(buffer, {

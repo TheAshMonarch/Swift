@@ -1,4 +1,10 @@
-import { Injectable, NotFoundException, BadRequestException } from '@nestjs/common';
+import {
+  Injectable,
+  Logger,
+  NotFoundException,
+  BadRequestException,
+  ForbiddenException,
+} from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model, Types } from 'mongoose';
 import * as bcrypt from 'bcrypt';
@@ -10,10 +16,14 @@ import { CloudinaryService } from '../../common/cloudinary/cloudinary.service';
 
 // Fields other users must never see. Use for every response that exposes a user
 // who is not the caller (profiles, search, populated bookings, chat partners).
-export const PUBLIC_USER_PROJECTION = '-passwordHash -phone -bankDetails';
+export const PUBLIC_USER_PROJECTION = '-passwordHash -phone -bankDetails -workPhotos.publicId';
+
+export const MAX_WORK_PHOTOS = 8;
 
 @Injectable()
 export class UsersService {
+  private readonly logger = new Logger(UsersService.name);
+
   constructor(
     @InjectModel(User.name) private userModel: Model<User>,
     private cloudinaryService: CloudinaryService,
@@ -116,6 +126,86 @@ export class UsersService {
     return user;
   }
 
+  // Upload public portfolio photos. Checked up front for a clear error, then
+  // enforced atomically: the $push only applies while there is still room, so
+  // parallel uploads can't exceed the limit. Uploaded files are deleted again
+  // whenever the photos don't end up saved.
+  async addWorkPhotos(id: string, images: Buffer[]): Promise<User> {
+    if (!images.length) throw new BadRequestException('Add at least one photo');
+
+    const user = await this.userModel.findById(id).select('role workPhotos').exec();
+    if (!user) throw new NotFoundException('User not found');
+    if (user.role !== 'professional') {
+      throw new ForbiddenException('Only professionals can add work photos');
+    }
+    const current = user.workPhotos?.length ?? 0;
+    const limitMessage = `You can have up to ${MAX_WORK_PHOTOS} work photos. You have ${current}.`;
+    if (current + images.length > MAX_WORK_PHOTOS) throw new BadRequestException(limitMessage);
+
+    const results = await Promise.allSettled(
+      images.map((image) =>
+        this.cloudinaryService.upload(image, {
+          folder: `swift/work/${id}`,
+          resource_type: 'image',
+          transformation: [{ width: 1600, height: 1600, crop: 'limit', quality: 'auto' }],
+        }),
+      ),
+    );
+    const uploaded = results.flatMap((r) =>
+      r.status === 'fulfilled' ? [{ url: r.value.secure_url, publicId: r.value.public_id }] : [],
+    );
+    const failure = results.find((r): r is PromiseRejectedResult => r.status === 'rejected');
+    if (failure) {
+      await this.destroyQuietly(uploaded.map((p) => p.publicId));
+      throw failure.reason;
+    }
+
+    const updated = await this.userModel
+      .findOneAndUpdate(
+        {
+          _id: id,
+          $expr: {
+            $lte: [{ $size: { $ifNull: ['$workPhotos', []] } }, MAX_WORK_PHOTOS - uploaded.length],
+          },
+        },
+        { $push: { workPhotos: { $each: uploaded } } },
+        { new: true },
+      )
+      .select('-passwordHash')
+      .exec();
+    if (!updated) {
+      await this.destroyQuietly(uploaded.map((p) => p.publicId));
+      throw new BadRequestException(limitMessage);
+    }
+    return updated;
+  }
+
+  async removeWorkPhoto(id: string, photoId: string): Promise<User> {
+    const before = await this.userModel
+      .findOneAndUpdate(
+        { _id: id, 'workPhotos._id': photoId },
+        { $pull: { workPhotos: { _id: photoId } } },
+      )
+      .select('workPhotos')
+      .exec();
+    if (!before) throw new NotFoundException('Photo not found');
+
+    const removed = before.workPhotos?.find((p) => p._id.toString() === photoId);
+    if (removed) await this.destroyQuietly([removed.publicId]);
+
+    const user = await this.userModel.findById(id).select('-passwordHash').exec();
+    if (!user) throw new NotFoundException('User not found');
+    return user;
+  }
+
+  // Best effort: an orphaned file costs storage, not correctness.
+  private async destroyQuietly(publicIds: string[]): Promise<void> {
+    const results = await Promise.allSettled(publicIds.map((pid) => this.cloudinaryService.destroy(pid)));
+    results.forEach((r, i) => {
+      if (r.status === 'rejected') this.logger.warn(`Could not delete Cloudinary file ${publicIds[i]}`);
+    });
+  }
+
   async updateLastLogin(id: string): Promise<void> {
     await this.userModel.findByIdAndUpdate(id, { $set: { lastLogin: new Date() } }).exec();
   }
@@ -184,7 +274,7 @@ export class UsersService {
 
     pipeline.push({ $sort: { 'proProfile.averageRating': -1 } });
     pipeline.push({ $limit: dto.limit ?? 20 });
-    pipeline.push({ $project: { passwordHash: 0, phone: 0, bankDetails: 0 } });
+    pipeline.push({ $project: { passwordHash: 0, phone: 0, bankDetails: 0, 'workPhotos.publicId': 0 } });
 
     return this.userModel.aggregate(pipeline).exec();
   }

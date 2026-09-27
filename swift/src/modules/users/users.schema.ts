@@ -1,5 +1,5 @@
 import { Prop, Schema, SchemaFactory } from '@nestjs/mongoose';
-import { Document, Schema as MongooseSchema } from 'mongoose';
+import { Document, Schema as MongooseSchema, Types } from 'mongoose';
 
 // --- GEOSPATIAL LOCATION STRUCTURE ---
 @Schema({ _id: false })
@@ -39,6 +39,17 @@ export class ProfessionalProfile {
   totalEarnings: number = 0;
 }
 
+// --- PUBLIC WORK PHOTO (professionals' portfolio shown on the marketplace) ---
+@Schema() // keeps _id so a photo can be deleted by id
+export class WorkPhoto {
+  @Prop({ type: String, required: true })
+  url!: string; // public Cloudinary URL
+
+  @Prop({ type: String, required: true })
+  publicId!: string; // Cloudinary id, needed to delete the file
+}
+const WorkPhotoSchema = SchemaFactory.createForClass(WorkPhoto);
+
 // --- CENTRAL USER SCHEMA ---
 @Schema({ timestamps: true })
 export class User extends Document {
@@ -72,6 +83,10 @@ export class User extends Document {
   // New: Added support for incoming Google OAuth profile pictures or uploaded files
   @Prop({ type: String, required: false })
   avatar?: string;
+
+  // Professionals only; the first photo is the marketplace cover. Max 8.
+  @Prop({ type: [WorkPhotoSchema], default: undefined })
+  workPhotos?: (WorkPhoto & { _id: Types.ObjectId })[];
 
   @Prop({ type: Date })
   lastLogin?: Date;

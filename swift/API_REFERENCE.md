@@ -75,6 +75,12 @@ interface BankDetails {
   recipientCode?: string;   // internal Paystack cache — ignore
 }
 
+interface WorkPhoto {
+  _id: string;              // use for DELETE /users/me/work-photos/:photoId
+  url: string;              // public image URL (Cloudinary, max 1600px)
+  publicId?: string;        // only on your own user; omitted for others
+}
+
 interface User {
   _id: string;
   name: string;
@@ -87,6 +93,7 @@ interface User {
   proProfile?: ProfessionalProfile; // only professionals (Google-created pros have none!)
   bankDetails?: BankDetails;
   avatar?: string;          // public image URL (upload via POST /users/me/avatar; Google users get their Google photo)
+  workPhotos?: WorkPhoto[]; // professionals' public portfolio, max 8; the first is the marketplace cover
   googleId?: string;
   lastLogin?: string;
   createdAt: string;
@@ -270,6 +277,12 @@ Get valid `bankCode`/`bankName` values from `GET /payments/banks`.
 
 #### `POST /users/me/avatar` → `User` (updated)
 `multipart/form-data` with one file field **`avatar`**: JPEG / PNG / WebP, ≤ 5 MB. The server crops it to 512×512 (face-centred). The new `avatar` URL changes on every upload, so caches refresh. Errors: `400` wrong type / missing file / too large.
+
+#### 🧰 `POST /users/me/work-photos` → `User` (updated) · professionals only
+`multipart/form-data` with 1–8 files in the field **`photos`**: JPEG / PNG / WebP, ≤ 5 MB each. They're appended in order, and a professional can have at most **8** in total. Errors: `400` wrong type, no file, "Too many files", or "You can have up to 8 work photos. You have N." · `403` not a professional · `413` a file is too large.
+
+#### 🧰 `DELETE /users/me/work-photos/:photoId` → `User` (updated) · professionals only
+`404` if the photo isn't yours. The image is also deleted from storage.
 
 #### `POST /users/search/providers` → `ProviderSearchResult[]`
 Only returns professionals with `isVerified && isActive`, sorted by `averageRating` desc.
