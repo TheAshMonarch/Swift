@@ -1,15 +1,15 @@
 import { Prop, Schema, SchemaFactory } from '@nestjs/mongoose';
-import { Document, Types } from 'mongoose';
+import { Document, Schema as MongooseSchema, Types } from 'mongoose';
 
 @Schema({ timestamps: true })
 export class Message extends Document {
-  @Prop({ type: Types.ObjectId, ref: 'User', required: true })
+  @Prop({ type: MongooseSchema.Types.ObjectId, ref: 'User', required: true })
   senderId!: Types.ObjectId;
 
-  @Prop({ type: Types.ObjectId, ref: 'User', required: true })
+  @Prop({ type: MongooseSchema.Types.ObjectId, ref: 'User', required: true })
   receiverId!: Types.ObjectId;
 
-  @Prop({ type: Types.ObjectId, ref: 'Booking', required: false })
+  @Prop({ type: MongooseSchema.Types.ObjectId, ref: 'Booking', required: false })
   bookingId?: Types.ObjectId;
 
   @Prop({ type: String, required: true })

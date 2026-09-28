@@ -357,6 +357,8 @@ All `disputed` bookings, oldest first, with both parties populated (including `p
 
 `fund` is idempotent: repeat calls return the same `paymentUrl` and `reference`. It returns `409` if another `/fund` call for the same booking is still in progress, so retry after a moment.
 
+**Paystack failures return `502`** with Paystack's own reason in `message`, e.g. `"Paystack could not send the payout: …"`. This applies to `/fund`, `/release`, `/resolve` and `GET /payments/banks`. The booking stays in its previous status, so the action can be retried. A payout that Paystack holds for an OTP is rejected with `400` and the same rollback.
+
 Errors: `403` "Not your booking", `400` wrong state (e.g. "Booking is not pending", "Job must be marked complete first", "Professional has no bank details on file"), `404` not found.
 
 ```

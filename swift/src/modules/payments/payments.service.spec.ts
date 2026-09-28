@@ -1,5 +1,6 @@
 import axios from 'axios';
 import { ConfigService } from '@nestjs/config';
+import { BadGatewayException } from '@nestjs/common';
 import { PaymentsService } from './payments.service';
 
 jest.mock('axios');
@@ -49,7 +50,7 @@ describe('PaymentsService.getBanks', () => {
 
   it('does not cache a failed fetch', async () => {
     mockedGet.mockRejectedValueOnce(new Error('paystack down'));
-    await expect(service.getBanks()).rejects.toThrow('paystack down');
+    await expect(service.getBanks()).rejects.toBeInstanceOf(BadGatewayException);
 
     mockedGet.mockResolvedValueOnce({
       data: { data: [{ name: 'GTBank', code: '058' }] },
@@ -86,5 +87,55 @@ describe('PaymentsService callback URL', () => {
 
   it('is undefined when nothing usable is configured', () => {
     expect(make({}).callbackUrl).toBeUndefined();
+  });
+});
+
+describe('PaymentsService Paystack errors', () => {
+  const mockedPost = axios.post as jest.Mock;
+  const svc = () =>
+    new PaymentsService({ get: () => 'sk_test' } as unknown as ConfigService);
+  const paystackError = (status: number, message: string) =>
+    Object.assign(new Error(`Request failed with status code ${status}`), {
+      response: { status, data: { status: false, message } },
+    });
+
+  beforeEach(() => mockedPost.mockReset());
+
+  it("surfaces Paystack's own message as a 502 instead of a bare 500", async () => {
+    mockedPost.mockRejectedValueOnce(
+      paystackError(400, 'You cannot initiate third party payouts as a starter business'),
+    );
+    const err = await svc()
+      .initiateTransfer({ amountKobo: 1000, recipientCode: 'R', reference: 'x', reason: 'r' })
+      .catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(BadGatewayException);
+    expect((err as BadGatewayException).message).toContain(
+      'You cannot initiate third party payouts as a starter business',
+    );
+  });
+
+  it('treats a transfer held for OTP as a failure (no money moved)', async () => {
+    mockedPost.mockResolvedValueOnce({
+      data: { status: true, data: { status: 'otp', transfer_code: 'TRF_1' } },
+    });
+    await expect(
+      svc().initiateTransfer({ amountKobo: 1000, recipientCode: 'R', reference: 'x', reason: 'r' }),
+    ).rejects.toThrow(/OTP/);
+  });
+
+  it('passes through a successful transfer', async () => {
+    mockedPost.mockResolvedValueOnce({
+      data: { status: true, data: { status: 'pending', transfer_code: 'TRF_2' } },
+    });
+    await expect(
+      svc().initiateTransfer({ amountKobo: 1000, recipientCode: 'R', reference: 'x', reason: 'r' }),
+    ).resolves.toMatchObject({ transfer_code: 'TRF_2' });
+  });
+
+  it('reports network failures without a Paystack response', async () => {
+    mockedPost.mockRejectedValueOnce(new Error('getaddrinfo ENOTFOUND api.paystack.co'));
+    await expect(
+      svc().createTransferRecipient({ name: 'A', accountNumber: '0123456789', bankCode: '058' }),
+    ).rejects.toBeInstanceOf(BadGatewayException);
   });
 });

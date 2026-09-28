@@ -1,5 +1,5 @@
 import { Prop, Schema, SchemaFactory } from '@nestjs/mongoose';
-import { Document, Types } from 'mongoose';
+import { Document, Schema as MongooseSchema, Types } from 'mongoose';
 
 export enum KycStatus {
   NONE = 'none',
@@ -30,7 +30,7 @@ const StoredFileSchema = SchemaFactory.createForClass(StoredFile);
 
 @Schema({ timestamps: true })
 export class KycSubmission extends Document {
-  @Prop({ type: Types.ObjectId, ref: 'User', required: true, unique: true })
+  @Prop({ type: MongooseSchema.Types.ObjectId, ref: 'User', required: true, unique: true })
   userId!: Types.ObjectId;
 
   @Prop({ type: String, enum: KycStatus, default: KycStatus.PENDING })
@@ -60,7 +60,7 @@ export class KycSubmission extends Document {
   @Prop({ type: [String], default: undefined })
   portfolioUrls?: string[];
 
-  @Prop({ type: Types.ObjectId, ref: 'User' })
+  @Prop({ type: MongooseSchema.Types.ObjectId, ref: 'User' })
   reviewedBy?: Types.ObjectId; // admin who approved/rejected
 
   @Prop({ type: Date })

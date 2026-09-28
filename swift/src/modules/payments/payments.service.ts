@@ -1,4 +1,9 @@
-import { Injectable, BadRequestException, Logger } from '@nestjs/common';
+import {
+  Injectable,
+  BadRequestException,
+  BadGatewayException,
+  Logger,
+} from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import axios from 'axios';
 import * as crypto from 'crypto';
@@ -9,7 +14,12 @@ export interface Bank {
 }
 
 interface PaystackBankPage {
-  data?: { name: string; code: string; active?: boolean; is_deleted?: boolean }[];
+  data?: {
+    name: string;
+    code: string;
+    active?: boolean;
+    is_deleted?: boolean;
+  }[];
   meta?: { next?: string | null };
 }
 
@@ -22,7 +32,9 @@ const asHttpUrl = (value?: string): string | undefined => {
   if (!value) return undefined;
   try {
     const url = new URL(value.trim());
-    return url.protocol === 'https:' || url.protocol === 'http:' ? url.toString() : undefined;
+    return url.protocol === 'https:' || url.protocol === 'http:'
+      ? url.toString()
+      : undefined;
   } catch {
     return undefined;
   }
@@ -53,11 +65,17 @@ export class PaymentsService {
     if (valid) return valid;
 
     const frontend = asHttpUrl(this.config.get<string>('FRONTEND_URL'));
-    const fallback = frontend ? new URL(PAYMENT_CALLBACK_PATH, frontend).toString() : undefined;
+    const fallback = frontend
+      ? new URL(PAYMENT_CALLBACK_PATH, frontend).toString()
+      : undefined;
     if (configured) {
-      this.logger.warn(`PAYSTACK_CALLBACK_URL is not a valid URL; using ${fallback ?? 'the Paystack dashboard default'}`);
+      this.logger.warn(
+        `PAYSTACK_CALLBACK_URL is not a valid URL; using ${fallback ?? 'the Paystack dashboard default'}`,
+      );
     } else if (!fallback) {
-      this.logger.warn('No PAYSTACK_CALLBACK_URL or FRONTEND_URL: customers will stay on Paystack after paying');
+      this.logger.warn(
+        'No PAYSTACK_CALLBACK_URL or FRONTEND_URL: customers will stay on Paystack after paying',
+      );
     }
     return fallback;
   }
@@ -68,24 +86,27 @@ export class PaymentsService {
     reference: string;
     metadata?: Record<string, any>;
   }) {
-    const { data } = await axios.post(
-      `${this.baseUrl}/transaction/initialize`,
-      {
-        email: params.email,
-        amount: params.amountKobo,
-        reference: params.reference,
-        metadata: params.metadata,
-        callback_url: this.callbackUrl,
-      },
-      { headers: this.headers },
+    const { data } = await this.paystack('initialize payment', () =>
+      axios.post(
+        `${this.baseUrl}/transaction/initialize`,
+        {
+          email: params.email,
+          amount: params.amountKobo,
+          reference: params.reference,
+          metadata: params.metadata,
+          callback_url: this.callbackUrl,
+        },
+        { headers: this.headers },
+      ),
     );
     return data.data;
   }
 
   async verifyTransaction(reference: string) {
-    const { data } = await axios.get(
-      `${this.baseUrl}/transaction/verify/${reference}`,
-      { headers: this.headers },
+    const { data } = await this.paystack('verify payment', () =>
+      axios.get(`${this.baseUrl}/transaction/verify/${reference}`, {
+        headers: this.headers,
+      }),
     );
     if (data.data.status !== 'success') {
       throw new BadRequestException('Payment verification failed');
@@ -98,16 +119,18 @@ export class PaymentsService {
     accountNumber: string;
     bankCode: string;
   }) {
-    const { data } = await axios.post(
-      `${this.baseUrl}/transferrecipient`,
-      {
-        type: 'nuban',
-        name: params.name,
-        account_number: params.accountNumber,
-        bank_code: params.bankCode,
-        currency: 'NGN',
-      },
-      { headers: this.headers },
+    const { data } = await this.paystack('set up the payout recipient', () =>
+      axios.post(
+        `${this.baseUrl}/transferrecipient`,
+        {
+          type: 'nuban',
+          name: params.name,
+          account_number: params.accountNumber,
+          bank_code: params.bankCode,
+          currency: 'NGN',
+        },
+        { headers: this.headers },
+      ),
     );
     return data.data;
   }
@@ -118,25 +141,36 @@ export class PaymentsService {
     reference: string;
     reason: string;
   }) {
-    const { data } = await axios.post(
-      `${this.baseUrl}/transfer`,
-      {
-        source: 'balance',
-        amount: params.amountKobo,
-        recipient: params.recipientCode,
-        reference: params.reference,
-        reason: params.reason,
-      },
-      { headers: this.headers },
+    const { data } = await this.paystack('send the payout', () =>
+      axios.post(
+        `${this.baseUrl}/transfer`,
+        {
+          source: 'balance',
+          amount: params.amountKobo,
+          recipient: params.recipientCode,
+          reference: params.reference,
+          reason: params.reason,
+        },
+        { headers: this.headers },
+      ),
     );
+    // Paystack accepts but holds the transfer when "OTP for transfers" is on:
+    // no money moves, so treat it as a failure the caller rolls back.
+    if (data.data?.status === 'otp') {
+      throw new BadRequestException(
+        'Paystack is holding this payout for an OTP. Turn off "OTP for transfers" in the Paystack dashboard (Settings → Preferences) and try again.',
+      );
+    }
     return data.data;
   }
 
   async refundTransaction(transactionId: string, amountKobo?: number) {
-    const { data } = await axios.post(
-      `${this.baseUrl}/refund`,
-      { transaction: transactionId, amount: amountKobo },
-      { headers: this.headers },
+    const { data } = await this.paystack('refund the payment', () =>
+      axios.post(
+        `${this.baseUrl}/refund`,
+        { transaction: transactionId, amount: amountKobo },
+        { headers: this.headers },
+      ),
     );
     return data.data;
   }
@@ -158,10 +192,19 @@ export class PaymentsService {
     let next: string | null = null;
     // Paystack paginates by cursor; guard against an endless loop.
     for (let page = 0; page < 20; page++) {
-      const { data }: { data: PaystackBankPage } = await axios.get(`${this.baseUrl}/bank`, {
-        headers: this.headers,
-        params: { currency: 'NGN', use_cursor: true, perPage: 100, ...(next ? { next } : {}) },
-      });
+      const { data }: { data: PaystackBankPage } = await this.paystack(
+        'load the bank list',
+        () =>
+          axios.get(`${this.baseUrl}/bank`, {
+            headers: this.headers,
+            params: {
+              currency: 'NGN',
+              use_cursor: true,
+              perPage: 100,
+              ...(next ? { next } : {}),
+            },
+          }),
+      );
       for (const bank of data.data ?? []) {
         if (bank.active !== false && !bank.is_deleted) {
           banks.push({ name: bank.name, code: bank.code });
@@ -171,6 +214,30 @@ export class PaymentsService {
       if (!next) break;
     }
     return banks.sort((a, b) => a.name.localeCompare(b.name));
+  }
+
+  // Every Paystack call goes through here so a failure reaches the client as a
+  // 502 with Paystack's own reason, instead of an opaque 500.
+  private async paystack<T>(
+    action: string,
+    call: () => Promise<T>,
+  ): Promise<T> {
+    try {
+      return await call();
+    } catch (err) {
+      const response = (
+        err as { response?: { status?: number; data?: { message?: string } } }
+      ).response;
+      const reason = response?.data?.message;
+      this.logger.error(
+        `Paystack could not ${action}: ${response?.status ?? 'no response'} ${reason ?? (err as Error).message}`,
+      );
+      throw new BadGatewayException(
+        reason
+          ? `Paystack could not ${action}: ${reason}`
+          : `Couldn't reach Paystack to ${action}. Please try again.`,
+      );
+    }
   }
 
   generateReference(prefix = 'artiz'): string {

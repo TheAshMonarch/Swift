@@ -1,5 +1,5 @@
 import { Prop, Schema, SchemaFactory } from '@nestjs/mongoose';
-import { Document, Types } from 'mongoose';
+import { Document, Schema as MongooseSchema, Types } from 'mongoose';
 
 export enum BookingStatus {
   PENDING = 'pending',       // seeker created booking
@@ -15,10 +15,10 @@ export enum BookingStatus {
 
 @Schema({ timestamps: true })
 export class Booking extends Document {
-  @Prop({ type: Types.ObjectId, ref: 'User', required: true })
+  @Prop({ type: MongooseSchema.Types.ObjectId, ref: 'User', required: true })
   seekerId!: Types.ObjectId;
 
-  @Prop({ type: Types.ObjectId, ref: 'User', required: true })
+  @Prop({ type: MongooseSchema.Types.ObjectId, ref: 'User', required: true })
   professionalId!: Types.ObjectId;
 
   @Prop({ type: String, required: true })
@@ -73,7 +73,7 @@ export class Booking extends Document {
   @Prop({ type: String, enum: ['refund', 'release'] })
   disputeResolution?: 'refund' | 'release';
 
-  @Prop({ type: Types.ObjectId, ref: 'User' })
+  @Prop({ type: MongooseSchema.Types.ObjectId, ref: 'User' })
   resolvedBy?: Types.ObjectId;
 
   @Prop({ type: Date })

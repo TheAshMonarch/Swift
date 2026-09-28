@@ -56,5 +56,7 @@ The app reads these env vars: `MONGODB_URI`, `JWT_SECRET` (the app refuses to bo
 
 - `AppController`/`AppService` are not registered in `AppModule`, so they're dead code. The health check is `GET /health` (`modules/health`).
 - The tsconfig declares the path aliases `@common/*`, `@modules/*` and `@core/*`, but nothing uses them and `src/core` doesn't exist. Use relative imports.
+- Declare reference fields as `@Prop({ type: MongooseSchema.Types.ObjectId, ref: ... })` (with `Schema as MongooseSchema` imported from `mongoose`), never `type: Types.ObjectId`. The `Types.ObjectId` class makes the path `Mixed`, which silently disables casting, so string ids in queries match nothing. `src/common/schema-types.spec.ts` guards this.
+- Every Paystack call goes through `PaymentsService.paystack()`, which turns failures into a 502 carrying Paystack's reason. Transfers held for an OTP are treated as failures.
 - Put `IsObjectIdPipe` (from `@nestjs/mongoose`) on every `:id` route param. As a fallback, the exception filter maps any Mongoose `CastError` to a 400.
 - `scripts/seed.ts` redefines the Mongoose schemas instead of importing them. If you change `users.schema.ts`, keep the seed script in sync.
