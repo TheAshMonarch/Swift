@@ -8,8 +8,11 @@ import { VerifyOtpDto } from './verify-otp.dto';
 import { ForgotPasswordDto, ResetPasswordDto } from './reset-password.dto';
 import { IsEmail, IsNotEmpty, IsString } from 'class-validator';
 import { Throttle } from '@nestjs/throttler';
+import { Transform } from 'class-transformer';
+import { normalizeEmail } from '../../common/email';
 
 export class ResendOtpDto {
+  @Transform(({ value }) => normalizeEmail(value))
   @IsEmail()
   email!: string;
 }

@@ -29,10 +29,22 @@ export class BookingsService {
   ) {}
 
   // Seeker creates a booking request
-  async create(seekerId: string, dto: CreateBookingDto): Promise<Booking> {
+  async create(seekerId: string, dto: CreateBookingDto, role?: string): Promise<Booking> {
+    // Bookings are listed per side (seeker vs professional), so only customer
+    // accounts may create them.
+    if (role !== 'seeker') {
+      throw new ForbiddenException('Only customer accounts can book professionals');
+    }
+    if (dto.professionalId === seekerId) {
+      throw new BadRequestException("You can't book yourself");
+    }
     const professional = await this.usersService.findById(dto.professionalId);
     if (!professional || professional.role !== 'professional') {
       throw new NotFoundException('Professional not found');
+    }
+    // Same rule as the marketplace search: active, email-verified professionals only
+    if (!professional.isActive || !professional.isVerified) {
+      throw new BadRequestException("This professional isn't accepting bookings right now");
     }
 
     // Round to integer kobo: avoid float artifacts like 0.29 * 100 = 28.9999…
@@ -278,7 +290,7 @@ export class BookingsService {
     const claimed = await this.bookingModel
       .findOneAndUpdate(
         { _id: booking._id, status: BookingStatus.COMPLETED },
-        { $set: { status: BookingStatus.RELEASED, releasedAt: new Date() } },
+        { $set: { status: BookingStatus.RELEASED, releasedAt: new Date() }, $inc: { payoutAttempts: 1 } },
         { new: true },
       )
       .exec();
@@ -286,10 +298,11 @@ export class BookingsService {
       throw new BadRequestException('Job must be marked complete first');
     }
 
-    await this.payOutProfessional(booking, {
-      $set: { status: BookingStatus.COMPLETED },
-      $unset: { releasedAt: 1 },
-    });
+    await this.payOutProfessional(
+      booking,
+      { $set: { status: BookingStatus.COMPLETED }, $unset: { releasedAt: 1 } },
+      claimed.payoutAttempts,
+    );
     return this.bookingModel.findById(booking._id).exec().then((b) => b!);
   }
 
@@ -400,6 +413,7 @@ export class BookingsService {
               ? { status: BookingStatus.REFUNDED }
               : { status: BookingStatus.RELEASED, releasedAt: new Date() }),
           },
+          ...(outcome === 'release' ? { $inc: { payoutAttempts: 1 } } : {}),
         },
         { new: true },
       )
@@ -409,7 +423,7 @@ export class BookingsService {
     }
 
     if (outcome === 'release') {
-      await this.payOutProfessional(booking, rollback);
+      await this.payOutProfessional(booking, rollback, claimed.payoutAttempts);
     } else {
       try {
         const transaction = await this.paymentsService.verifyTransaction(booking.paystackReference!);
@@ -425,7 +439,11 @@ export class BookingsService {
   // Transfers professionalPayout to the pro's bank account and updates their stats.
   // The caller must already have claimed the RELEASED status; on any failure
   // before the transfer succeeds, `rollback` is applied and the error rethrown.
-  private async payOutProfessional(booking: Booking, rollback: Record<string, unknown>): Promise<void> {
+  private async payOutProfessional(
+    booking: Booking,
+    rollback: Record<string, unknown>,
+    attempt = 1,
+  ): Promise<void> {
     try {
       const professional = await this.usersService.findById(booking.professionalId.toString());
       if (!professional?.bankDetails) {
@@ -451,13 +469,19 @@ export class BookingsService {
       const transfer = await this.paymentsService.initiateTransfer({
         amountKobo: booking.professionalPayout,
         recipientCode,
-        reference: `payout_${booking._id.toString()}`, // Deterministic: safe against retries
+        // Deterministic per attempt: a duplicate call can't pay twice, while a
+        // retry after a failed payout gets a reference Paystack hasn't seen.
+        reference: attempt > 1 ? `payout_${booking._id.toString()}_${attempt}` : `payout_${booking._id.toString()}`,
         reason: `Artiz payout for booking ${booking._id.toString()}`,
       });
 
       await this.bookingModel
         .findByIdAndUpdate(booking._id, {
-          $set: { paystackTransferCode: transfer.transfer_code },
+          $set: {
+            paystackTransferCode: transfer.transfer_code,
+            payoutStatus: transfer.status === 'success' ? 'paid' : 'pending',
+          },
+          $unset: { payoutFailureReason: 1 },
         })
         .exec();
     } catch (error) {
@@ -469,6 +493,64 @@ export class BookingsService {
       booking.professionalId.toString(),
       booking.professionalPayout / 100, // back to naira
     );
+  }
+
+  // Paystack's transfer.* webhooks: the final word on whether a payout arrived.
+  // Idempotent (Paystack retries), and a stale event for an older attempt
+  // can't touch the booking because it's matched by the current transfer code.
+  async handleTransferEvent(
+    event: 'transfer.success' | 'transfer.failed' | 'transfer.reversed',
+    data: { reference?: string; transfer_code?: string; reason?: string },
+  ): Promise<void> {
+    let target: Record<string, unknown>;
+    if (data.transfer_code) {
+      target = { paystackTransferCode: data.transfer_code };
+    } else {
+      const m = /^payout_([a-f0-9]{24})(?:_\d+)?$/.exec(data.reference ?? '');
+      if (!m) return; // not one of our payouts
+      target = { _id: m[1] };
+    }
+
+    if (event === 'transfer.success') {
+      await this.bookingModel
+        .findOneAndUpdate({ ...target, status: BookingStatus.RELEASED }, { $set: { payoutStatus: 'paid' } })
+        .exec();
+      return;
+    }
+
+    const reason =
+      data.reason ||
+      (event === 'transfer.reversed' ? 'The bank reversed the payout.' : 'The bank transfer failed.');
+    // An admin-resolved dispute goes back to the admin; a customer release
+    // goes back to "awaiting release" so it can be retried.
+    const reverted =
+      (await this.bookingModel
+        .findOneAndUpdate(
+          { ...target, status: BookingStatus.RELEASED, disputeResolution: 'release' },
+          {
+            $set: { status: BookingStatus.DISPUTED, payoutStatus: 'failed', payoutFailureReason: reason },
+            $unset: { disputeResolution: 1, resolvedBy: 1, resolvedAt: 1, releasedAt: 1 },
+          },
+          { new: true },
+        )
+        .exec()) ??
+      (await this.bookingModel
+        .findOneAndUpdate(
+          { ...target, status: BookingStatus.RELEASED },
+          {
+            $set: { status: BookingStatus.COMPLETED, payoutStatus: 'failed', payoutFailureReason: reason },
+            $unset: { releasedAt: 1 },
+          },
+          { new: true },
+        )
+        .exec());
+    if (!reverted) return; // already handled, or not a released booking
+
+    await this.usersService.revertCompletedJob(
+      reverted.professionalId.toString(),
+      reverted.professionalPayout / 100,
+    );
+    this.logger.warn(`Payout failed for booking ${reverted._id.toString()}: ${reason}`);
   }
 
   // Seeker rates the professional — at most once per completed booking

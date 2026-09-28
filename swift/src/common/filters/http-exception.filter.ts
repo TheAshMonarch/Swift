@@ -23,6 +23,26 @@ export class HttpExceptionFilter implements ExceptionFilter {
       return;
     }
 
+    // Unique index violation (e.g. two sign-ups at once, or changing to a phone
+    // number someone else has). Name the field, never echo the value.
+    const mongo = exception as { code?: number; keyPattern?: Record<string, unknown> };
+    if (mongo?.code === 11000) {
+      const field = Object.keys(mongo.keyPattern ?? {})[0];
+      const message =
+        field === 'email'
+          ? 'That email is already registered.'
+          : field === 'phone'
+            ? 'That phone number is already in use.'
+            : 'That value is already in use.';
+      response.status(HttpStatus.CONFLICT).json({
+        statusCode: HttpStatus.CONFLICT,
+        timestamp: new Date().toISOString(),
+        path: request.url,
+        message: [message],
+      });
+      return;
+    }
+
     // If it is a known NestJS HTTP error, get its status. Otherwise, treat it as a 500 Server Error.
     const status = exception instanceof HttpException
       ? exception.getStatus()

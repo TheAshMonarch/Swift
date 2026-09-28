@@ -1,11 +1,15 @@
 import { IsEmail, IsString, Length, Matches, MinLength } from 'class-validator';
+import { Transform } from 'class-transformer';
+import { normalizeEmail } from '../../common/email';
 
 export class ForgotPasswordDto {
+  @Transform(({ value }) => normalizeEmail(value))
   @IsEmail()
   email!: string;
 }
 
 export class ResetPasswordDto {
+  @Transform(({ value }) => normalizeEmail(value))
   @IsEmail()
   email!: string;
 

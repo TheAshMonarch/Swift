@@ -3,6 +3,7 @@ import {
   ConflictException,
   UnauthorizedException,
   BadRequestException,
+  Logger,
 } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model } from 'mongoose';
@@ -18,16 +19,20 @@ import { GoogleLoginDto } from './google-login.dto';
 import { Otp } from './otp.schema';
 import { VerifyOtpDto } from './verify-otp.dto';
 import { ResetPasswordDto } from './reset-password.dto';
+import { emailMatch, normalizeEmail } from '../../common/email';
 
 const RESET_CODE_TTL_MINUTES = 15;
-const MAX_RESET_ATTEMPTS = 5;
+// Wrong guesses allowed per emailed code (verification and reset) before it's destroyed
+const MAX_CODE_ATTEMPTS = 5;
 
 const generateCode = (): string => randomInt(100000, 1000000).toString();
 const hashCode = (code: string): Buffer => createHash('sha256').update(code).digest();
+const sameCode = (a: string, b: string): boolean => timingSafeEqual(hashCode(a), hashCode(b));
 
 @Injectable()
 export class AuthService {
   private googleClient: OAuth2Client;
+  private readonly logger = new Logger(AuthService.name);
 
   constructor(
     @InjectModel(User.name) private readonly userModel: Model<User>,
@@ -55,29 +60,25 @@ export class AuthService {
     user: Omit<User, 'passwordHash'>;
   }> {
     const { token, location, role } = googleLoginDto;
-    const t0 = Date.now();
 
     try {
       const ticket = await this.googleClient.verifyIdToken({
         idToken: token,
         audience: this.configService.get<string>('GOOGLE_CLIENT_ID'),
       });
-      const t1 = Date.now();
-      console.log(`[googleLogin] verifyIdToken: ${t1 - t0}ms`);
 
       const payload = ticket.getPayload();
       if (!payload || !payload.email)
         throw new UnauthorizedException('Invalid Google token payload');
-      const { email, name, picture } = payload;
+      const { name, picture } = payload;
+      const email = normalizeEmail(payload.email) as string;
 
-      let user = await this.userModel.findOne({ email });
+      let user = await this.userModel.findOne({ email: emailMatch(email) });
       if (user && !user.avatar && picture) {
         // Existing account without a picture: adopt the Google one
         user.avatar = picture;
         await user.save();
       }
-      const t2 = Date.now();
-      console.log(`[googleLogin] findOne: ${t2 - t1}ms`);
 
       if (!user) {
         const coordinates = location?.coordinates || [7.92, 5.03];
@@ -97,8 +98,6 @@ export class AuthService {
           ...(picture ? { avatar: picture } : {}),
         });
         await user.save();
-        const t3 = Date.now();
-        console.log(`[googleLogin] save (new user): ${t3 - t2}ms`);
       }
 
       const jwtPayload = {
@@ -107,11 +106,7 @@ export class AuthService {
         role: user.role,
       };
 
-      const signStart = Date.now();
       const accessToken = this.jwtService.sign(jwtPayload);
-      console.log(`[googleLogin] jwt.sign: ${Date.now() - signStart}ms`);
-
-      console.log(`[googleLogin] TOTAL: ${Date.now() - t0}ms`);
 
       return {
         message: 'google login successful',
@@ -119,7 +114,8 @@ export class AuthService {
         user: this.sanitizeUser(user),
       };
     } catch (error) {
-      console.error('Google verify error details:', error);
+      // Log the reason only: the error can echo the token or the user's email
+      this.logger.warn(`Google sign-in failed: ${(error as Error).message}`);
       throw new UnauthorizedException('Google authentication failed');
     }
   }
@@ -130,7 +126,7 @@ export class AuthService {
     const { email, phone, password, location, ...rest } = registerDto;
 
     const existingUser = await this.userModel.findOne({
-      $or: [{ email }, { phone }],
+      $or: [{ email: emailMatch(email) }, { phone }],
     });
     if (existingUser) {
       throw new ConflictException('Email or phone number already registered');
@@ -166,7 +162,7 @@ export class AuthService {
   }> {
     const { email, password } = loginDto;
 
-    const user = await this.userModel.findOne({ email });
+    const user = await this.userModel.findOne({ email: emailMatch(email) });
     if (!user) {
       throw new UnauthorizedException('Invalid email or password');
     }
@@ -229,7 +225,7 @@ export class AuthService {
       message: 'If an account exists for this email, a password reset code has been sent.',
     };
 
-    const user = await this.userModel.findOne({ email }).select('_id').exec();
+    const user = await this.userModel.findOne({ email: emailMatch(email) }).select('_id').exec();
     if (!user) return response;
 
     const code = generateCode();
@@ -270,7 +266,7 @@ export class AuthService {
       )
       .exec();
     if (!record) throw invalid;
-    if (record.attempts > MAX_RESET_ATTEMPTS) {
+    if (record.attempts > MAX_CODE_ATTEMPTS) {
       await this.otpModel.deleteOne({ _id: record._id });
       throw invalid;
     }
@@ -289,7 +285,7 @@ export class AuthService {
     // Receiving the code proves ownership of the email, so this also verifies
     // the account (and lets Google-only users set a password).
     const result = await this.userModel.updateOne(
-      { email },
+      { email: emailMatch(email) },
       { $set: { passwordHash, isVerified: true } },
     );
     if (result.matchedCount === 0) throw invalid;
@@ -302,9 +298,7 @@ export class AuthService {
     const senderEmail = this.configService.get<string>('OTP_SENDER_EMAIL');
 
     if (!brevoApiKey || !senderEmail) {
-      console.error(
-        ' Brevo delivery skipped: BREVO_API_KEY or OTP_SENDER_EMAIL environment variable is missing.',
-      );
+      this.logger.error('Email not sent: BREVO_API_KEY or OTP_SENDER_EMAIL is missing.');
       throw new BadRequestException('Unable to send email. Please try again later.');
     }
 
@@ -329,40 +323,39 @@ export class AuthService {
         throw new Error(JSON.stringify(errorData));
       }
 
-      console.log(`✓ Email "${subject}" sent via Brevo HTTP to ${to}`);
+      this.logger.log(`Email sent: "${subject}"`); // no recipient address in logs
     } catch (error) {
       // Log it internally, but do NOT claim success to the client when delivery failed.
-      console.error('❌ Brevo HTTP email delivery failed:', error);
+      this.logger.error(`Brevo email delivery failed: ${(error as Error).message}`);
       throw new BadRequestException('Failed to send email. Please try again later.');
     }
   }
 
   async verifyOtp(verifyOtpDto: VerifyOtpDto): Promise<{ message: string }> {
     const { phoneOrEmail, code } = verifyOtpDto;
+    const invalid = new BadRequestException('Invalid verification code or code expired.');
 
-    // Search for the matching active code parameter
-    // Legacy records have no purpose; reset codes must never verify via this path
-    const record = await this.otpModel.findOne({
-      phoneOrEmail,
-      code,
-      purpose: { $ne: 'reset' },
-    });
-    if (!record) {
-      throw new BadRequestException(
-        'Invalid verification code or code expired.',
-      );
-    }
-
-    // Check if the current time is past the expiration mark
-    if (new Date() > record.expiresAt) {
+    // Count the attempt BEFORE comparing (atomic), so guesses spread across
+    // IPs or sent in parallel still hit the per-code cap. Legacy records have
+    // no purpose; reset codes must never verify an account via this path.
+    const record = await this.otpModel
+      .findOneAndUpdate(
+        { phoneOrEmail, purpose: { $ne: 'reset' }, expiresAt: { $gt: new Date() } },
+        { $inc: { attempts: 1 } },
+        { new: true },
+      )
+      .exec();
+    if (!record) throw invalid;
+    if (record.attempts > MAX_CODE_ATTEMPTS) {
       await this.otpModel.deleteOne({ _id: record._id });
-      throw new BadRequestException('Verification code has expired.');
+      throw new BadRequestException('Too many wrong attempts. Request a new code.');
     }
+    if (!sameCode(record.code, code)) throw invalid;
 
     // SECURITY: only mark the account verified if an actual user exists for
     // this OTP target — otherwise anyone could "verify" arbitrary emails.
     const result = await this.userModel.updateOne(
-      { $or: [{ email: phoneOrEmail }, { phone: phoneOrEmail }] },
+      { $or: [{ email: emailMatch(phoneOrEmail) }, { phone: phoneOrEmail }] },
       { isVerified: true },
     );
     if (result.matchedCount === 0) {

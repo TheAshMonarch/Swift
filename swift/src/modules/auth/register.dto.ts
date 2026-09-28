@@ -1,5 +1,6 @@
 import { IsEmail, IsNotEmpty, IsString, MinLength, IsEnum, IsArray, IsNumber, IsOptional, ValidateNested } from 'class-validator';
-import { Type } from 'class-transformer';
+import { Transform, Type } from 'class-transformer';
+import { normalizeEmail } from '../../common/email';
 
 export class LocationDto {
   // Required data from client -> Use '!'
@@ -31,6 +32,7 @@ export class RegisterDto {
   name!: string;
 
   // Required data from client -> Use '!'
+  @Transform(({ value }) => normalizeEmail(value))
   @IsEmail()
   email!: string;
 

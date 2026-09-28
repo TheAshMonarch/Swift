@@ -4,6 +4,7 @@ import { BookingsService } from './bookings.service';
 import { CreateBookingDto } from './dto/create-booking.dto';
 import { RateBookingDto } from './dto/rate-booking.dto';
 import { CancelBookingDto } from './dto/cancel-booking.dto';
+import { RaiseDisputeDto } from './dto/raise-dispute.dto';
 import { ResolveDisputeDto } from './dto/resolve-dispute.dto';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
 import { RolesGuard } from '../../common/guards/roles.guard';
@@ -16,7 +17,7 @@ export class BookingsController {
   @Post()
   @UseGuards(JwtAuthGuard)
   create(@Req() req: any, @Body() dto: CreateBookingDto) {
-    return this.bookingsService.create(req.user.userId, dto);
+    return this.bookingsService.create(req.user.userId, dto, req.user.role);
   }
 
   @Put(':id/accept')
@@ -55,8 +56,8 @@ export class BookingsController {
 
   @Put(':id/dispute')
   @UseGuards(JwtAuthGuard)
-  raiseDispute(@Req() req: any, @Param('id', IsObjectIdPipe) id: string, @Body('reason') reason: string) {
-    return this.bookingsService.raiseDispute(id, req.user.userId, reason);
+  raiseDispute(@Req() req: any, @Param('id', IsObjectIdPipe) id: string, @Body() dto: RaiseDisputeDto) {
+    return this.bookingsService.raiseDispute(id, req.user.userId, dto.reason);
   }
 
   @Post(':id/rating')

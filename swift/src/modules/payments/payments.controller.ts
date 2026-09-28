@@ -43,9 +43,14 @@ export class PaymentsController {
 
     const event = JSON.parse(rawBody);
 
-    // Only care about successful payments
     if (event.event === 'charge.success') {
       await this.bookingsService.confirmFunding(event.data.reference);
+    } else if (
+      event.event === 'transfer.success' ||
+      event.event === 'transfer.failed' ||
+      event.event === 'transfer.reversed'
+    ) {
+      await this.bookingsService.handleTransferEvent(event.event, event.data ?? {});
     }
 
     return { received: true };

@@ -89,7 +89,7 @@ describe('AuthService password reset', () => {
       await service.resetPassword(dto);
 
       const [filter, update] = userModel.updateOne.mock.calls[0];
-      expect(filter).toEqual({ email: 'user@x.com' });
+      expect(new RegExp(filter.email.$regex, filter.email.$options).test('User@X.com')).toBe(true);
       expect(update.$set.isVerified).toBe(true);
       await expect(
         bcrypt.compare('newpass1', update.$set.passwordHash),
@@ -134,6 +134,72 @@ describe('AuthService password reset', () => {
         BadRequestException,
       );
       expect(userModel.updateOne).not.toHaveBeenCalled();
+    });
+  });
+});
+
+describe('AuthService login, register and verification', () => {
+  let service: AuthService;
+  let userModel: Record<string, jest.Mock>;
+  let otpModel: Record<string, jest.Mock>;
+
+  beforeEach(async () => {
+    userModel = { findOne: jest.fn(), updateOne: jest.fn().mockResolvedValue({ matchedCount: 1 }) };
+    otpModel = { findOneAndUpdate: jest.fn(), deleteOne: jest.fn().mockResolvedValue({ deletedCount: 1 }) };
+    const module: TestingModule = await Test.createTestingModule({
+      providers: [
+        AuthService,
+        { provide: getModelToken('User'), useValue: userModel },
+        { provide: getModelToken('Otp'), useValue: otpModel },
+        { provide: JwtService, useValue: { sign: () => 'jwt' } },
+        { provide: ConfigService, useValue: { get: () => undefined } },
+      ],
+    }).compile();
+    service = module.get<AuthService>(AuthService);
+  });
+
+  it('finds accounts stored with different capitalisation', async () => {
+    const hash = await bcrypt.hash('secret1', 4);
+    userModel.findOne.mockResolvedValue({
+      _id: 'u1', email: 'Chioma@X.com', role: 'seeker', isVerified: true, passwordHash: hash,
+      toObject() { return { ...this }; },
+    });
+    const res = await service.login({ email: 'chioma@x.com', password: 'secret1' });
+    expect(res.accessToken).toBe('jwt');
+    const filter = userModel.findOne.mock.calls[0][0];
+    expect(new RegExp(filter.email.$regex, filter.email.$options).test('Chioma@X.com')).toBe(true);
+  });
+
+  describe('verifyOtp', () => {
+    const dto = { phoneOrEmail: 'chioma@x.com', code: '123456' };
+
+    it('counts the attempt before comparing, and verifies on a correct code', async () => {
+      otpModel.findOneAndUpdate.mockReturnValue(exec({ _id: 'o1', code: '123456', attempts: 1 }));
+      await service.verifyOtp(dto);
+      const [filter, update] = otpModel.findOneAndUpdate.mock.calls[0];
+      expect(update).toEqual({ $inc: { attempts: 1 } });
+      expect(filter.purpose).toEqual({ $ne: 'reset' });
+      expect(filter.expiresAt.$gt).toBeInstanceOf(Date);
+      expect(userModel.updateOne).toHaveBeenCalled();
+      expect(otpModel.deleteOne).toHaveBeenCalledWith({ _id: 'o1' });
+    });
+
+    it('rejects a wrong code without verifying the account', async () => {
+      otpModel.findOneAndUpdate.mockReturnValue(exec({ _id: 'o1', code: '999999', attempts: 2 }));
+      await expect(service.verifyOtp(dto)).rejects.toBeInstanceOf(BadRequestException);
+      expect(userModel.updateOne).not.toHaveBeenCalled();
+    });
+
+    it('destroys the code after 5 wrong attempts, even if the next guess is right', async () => {
+      otpModel.findOneAndUpdate.mockReturnValue(exec({ _id: 'o1', code: '123456', attempts: 6 }));
+      await expect(service.verifyOtp(dto)).rejects.toThrow(/new code/);
+      expect(otpModel.deleteOne).toHaveBeenCalledWith({ _id: 'o1' });
+      expect(userModel.updateOne).not.toHaveBeenCalled();
+    });
+
+    it('rejects when there is no active code', async () => {
+      otpModel.findOneAndUpdate.mockReturnValue(exec(null));
+      await expect(service.verifyOtp(dto)).rejects.toBeInstanceOf(BadRequestException);
     });
   });
 });

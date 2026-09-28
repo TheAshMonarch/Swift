@@ -337,6 +337,16 @@ export class UsersService {
     return updated;
   }
 
+  // Undo incrementCompletedJobs when Paystack reports the payout failed.
+  async revertCompletedJob(providerId: string, earnings = 0): Promise<void> {
+    await this.userModel
+      .updateOne(
+        { _id: providerId },
+        { $inc: { 'proProfile.completedJobs': -1, 'proProfile.totalEarnings': -earnings } },
+      )
+      .exec();
+  }
+
   async getProviderStats(providerId: string): Promise<any> {
     const user = await this.findById(providerId);
     if (!user?.proProfile) throw new NotFoundException('Provider not found');

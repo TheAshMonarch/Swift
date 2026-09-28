@@ -399,4 +399,140 @@ describe('BookingsService', () => {
       ).resolves.toBeDefined();
     });
   });
+
+  describe('create', () => {
+    const dto = { professionalId, serviceDescription: 'Fix the kitchen sink', agreedAmountNaira: 5000 };
+    const pro = (o: Record<string, unknown> = {}) => ({
+      _id: new Types.ObjectId(professionalId),
+      role: 'professional',
+      isActive: true,
+      isVerified: true,
+      ...o,
+    });
+
+    beforeEach(() => {
+      bookingModel.create = jest.fn().mockImplementation((doc: unknown) => Promise.resolve(doc));
+    });
+
+    it('creates a pending booking with the 10% split in kobo', async () => {
+      usersService.findById.mockResolvedValue(pro());
+      const b = (await service.create(seekerId, dto, 'seeker')) as unknown as Record<string, number>;
+      expect(b.agreedAmount).toBe(500_000);
+      expect(b.commissionAmount).toBe(50_000);
+      expect(b.professionalPayout).toBe(450_000);
+    });
+
+    it('only customer accounts can book', async () => {
+      usersService.findById.mockResolvedValue(pro());
+      await expect(service.create(seekerId, dto, 'professional')).rejects.toBeInstanceOf(ForbiddenException);
+      await expect(service.create(seekerId, dto, 'admin')).rejects.toBeInstanceOf(ForbiddenException);
+      expect(bookingModel.create).not.toHaveBeenCalled();
+    });
+
+    it("can't book yourself", async () => {
+      await expect(
+        service.create(professionalId, { ...dto, professionalId }, 'seeker'),
+      ).rejects.toBeInstanceOf(BadRequestException);
+    });
+
+    it.each([
+      ['deactivated', { isActive: false }],
+      ['email not verified', { isVerified: false }],
+    ])('rejects a professional who is %s', async (_label, o) => {
+      usersService.findById.mockResolvedValue(pro(o));
+      await expect(service.create(seekerId, dto, 'seeker')).rejects.toBeInstanceOf(BadRequestException);
+      expect(bookingModel.create).not.toHaveBeenCalled();
+    });
+
+    it('404s for a user who is not a professional', async () => {
+      usersService.findById.mockResolvedValue(pro({ role: 'seeker' }));
+      await expect(service.create(seekerId, dto, 'seeker')).rejects.toThrow('Professional not found');
+    });
+  });
+
+  describe('payouts', () => {
+    const withBank = {
+      _id: new Types.ObjectId(professionalId),
+      name: 'Pro',
+      bankDetails: { accountNumber: '0123456789', bankCode: '058', bankName: 'GTB', recipientCode: 'RCP_1' },
+    };
+    const completed = (o: Record<string, unknown> = {}) =>
+      makeBooking({ status: BookingStatus.COMPLETED, professionalPayout: 450_000, ...o });
+
+    beforeEach(() => {
+      usersService.findById.mockResolvedValue(withBank);
+      usersService.revertCompletedJob = jest.fn().mockResolvedValue({});
+    });
+
+    it('first release uses payout_<id>; a retry gets a fresh reference', async () => {
+      bookingModel.findById.mockReturnValue(query(completed()));
+      bookingModel.findOneAndUpdate.mockReturnValueOnce(exec(completed({ payoutAttempts: 1 })));
+      await service.releaseFunds(bookingId, seekerId);
+      expect(paymentsService.initiateTransfer.mock.calls[0][0].reference).toBe(`payout_${bookingId}`);
+
+      bookingModel.findOneAndUpdate.mockReturnValueOnce(exec(completed({ payoutAttempts: 2 })));
+      await service.releaseFunds(bookingId, seekerId);
+      expect(paymentsService.initiateTransfer.mock.calls[1][0].reference).toBe(`payout_${bookingId}_2`);
+
+      // the claim counts the attempt atomically
+      expect(bookingModel.findOneAndUpdate.mock.calls[0][1]).toMatchObject({ $inc: { payoutAttempts: 1 } });
+    });
+
+    it('records the payout as pending until Paystack confirms it', async () => {
+      bookingModel.findById.mockReturnValue(query(completed()));
+      bookingModel.findOneAndUpdate.mockReturnValueOnce(exec(completed({ payoutAttempts: 1 })));
+      await service.releaseFunds(bookingId, seekerId);
+      const saved = bookingModel.findByIdAndUpdate.mock.calls.find((c) => c[1]?.$set?.paystackTransferCode);
+      expect(saved?.[1].$set).toMatchObject({ paystackTransferCode: 'TRF_1', payoutStatus: 'pending' });
+    });
+
+    it('transfer.success marks the payout paid', async () => {
+      bookingModel.findOneAndUpdate.mockReturnValueOnce(exec(makeBooking({ status: BookingStatus.RELEASED })));
+      await service.handleTransferEvent('transfer.success', { transfer_code: 'TRF_1', reference: `payout_${bookingId}` });
+      const [filter, update] = bookingModel.findOneAndUpdate.mock.calls[0];
+      expect(filter).toMatchObject({ paystackTransferCode: 'TRF_1', status: BookingStatus.RELEASED });
+      expect(update).toEqual({ $set: { payoutStatus: 'paid' } });
+    });
+
+    it('transfer.failed puts a customer release back to "awaiting release" and reverses stats', async () => {
+      bookingModel.findOneAndUpdate
+        .mockReturnValueOnce(exec(null)) // not an admin dispute release
+        .mockReturnValueOnce(exec(makeBooking({ status: BookingStatus.COMPLETED, professionalPayout: 450_000 })));
+      await service.handleTransferEvent('transfer.failed', { transfer_code: 'TRF_1', reason: 'Account closed' });
+      const [filter, update] = bookingModel.findOneAndUpdate.mock.calls[1];
+      expect(filter).toMatchObject({ paystackTransferCode: 'TRF_1', status: BookingStatus.RELEASED });
+      expect(update.$set).toMatchObject({
+        status: BookingStatus.COMPLETED,
+        payoutStatus: 'failed',
+        payoutFailureReason: 'Account closed',
+      });
+      expect(usersService.revertCompletedJob).toHaveBeenCalledWith(professionalId, 4500);
+    });
+
+    it('transfer.reversed on an admin release puts the booking back in dispute', async () => {
+      bookingModel.findOneAndUpdate.mockReturnValueOnce(
+        exec(makeBooking({ status: BookingStatus.DISPUTED, professionalPayout: 450_000 })),
+      );
+      await service.handleTransferEvent('transfer.reversed', { transfer_code: 'TRF_1' });
+      const [filter, update] = bookingModel.findOneAndUpdate.mock.calls[0];
+      expect(filter).toMatchObject({ disputeResolution: 'release' });
+      expect(update.$set.status).toBe(BookingStatus.DISPUTED);
+      expect(update.$unset).toMatchObject({ disputeResolution: 1, resolvedBy: 1, resolvedAt: 1 });
+      expect(usersService.revertCompletedJob).toHaveBeenCalled();
+    });
+
+    it('a repeated failure event changes nothing (Paystack retries webhooks)', async () => {
+      bookingModel.findOneAndUpdate.mockReturnValue(exec(null));
+      await service.handleTransferEvent('transfer.failed', { transfer_code: 'TRF_1' });
+      expect(usersService.revertCompletedJob).not.toHaveBeenCalled();
+    });
+
+    it('falls back to the payout reference when there is no transfer code', async () => {
+      bookingModel.findOneAndUpdate.mockReturnValue(exec(null));
+      await service.handleTransferEvent('transfer.success', { reference: `payout_${bookingId}_3` });
+      expect(bookingModel.findOneAndUpdate.mock.calls[0][0]).toMatchObject({ _id: bookingId });
+      await service.handleTransferEvent('transfer.success', { reference: 'escrow_123' });
+      expect(bookingModel.findOneAndUpdate).toHaveBeenCalledTimes(1); // unrelated reference ignored
+    });
+  });
 });

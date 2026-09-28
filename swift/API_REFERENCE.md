@@ -30,7 +30,9 @@ Derived directly from the source of `TheAshMonarch/Swift` (branch `backend-fixes
 }
 ```
 
-`message` is **always an array of strings**. Unknown server errors return 500 with `["Internal server error"]`. An invalid ObjectId in a URL param (`:id`) returns **400** (`"Invalid ObjectId: '…' is not a valid MongoDB ObjectId"`). Exception: `GET /chat/:userId` returns `[]`.
+`message` is **always an array of strings**. A duplicate email or phone (for example on `PUT /users/me`) returns **`409`** ("That phone number is already in use.").
+
+Emails are matched **case-insensitively** everywhere and stored lowercased. Unknown server errors return 500 with `["Internal server error"]`. An invalid ObjectId in a URL param (`:id`) returns **400** (`"Invalid ObjectId: '…' is not a valid MongoDB ObjectId"`). Exception: `GET /chat/:userId` returns `[]`.
 
 ### Rate limits (per IP) → `429 Too Many Requests`
 
@@ -124,6 +126,9 @@ interface Booking {
   paystackReference?: string;
   paystackAuthorizationUrl?: string; // checkout URL; same value returned by every /fund call
   paystackTransferCode?: string;
+  payoutStatus?: 'pending' | 'paid' | 'failed'; // set on release; confirmed by Paystack's transfer webhooks
+  payoutFailureReason?: string;  // when payoutStatus is 'failed'
+  payoutAttempts: number;
   disputeReason?: string;
   fundedAt?: string;
   completedAt?: string;
@@ -209,7 +214,7 @@ Errors: `409` email/phone taken, `400` validation / email delivery failure.
 { phoneOrEmail: string; code: string }   // note field name: phoneOrEmail
 // response: { message: "Account verified successfully." }
 ```
-Errors: `400` invalid/expired code or no account.
+Errors: `400` invalid/expired code or no account. Each code allows **5 wrong attempts**; after that it's destroyed ("Too many wrong attempts. Request a new code.").
 
 #### 🔓 `POST /auth/resend-otp` → `200`
 ```ts
@@ -312,7 +317,7 @@ No pagination.
 
 ### 3.3 Bookings — `/bookings` (all 🔒)
 
-#### `POST /bookings` → `201 Booking` (status `pending`)
+#### `POST /bookings` → `201 Booking` (status `pending`) · customer (`seeker`) accounts only
 ```ts
 {
   professionalId: string;     // Mongo id of a user with role professional
@@ -320,6 +325,7 @@ No pagination.
   agreedAmountNaira: number;  // min 100 (NAIRA — response amounts are KOBO)
 }
 ```
+Errors: `403` "Only customer accounts can book professionals", `400` "You can't book yourself", `400` "This professional isn't accepting bookings right now" (deactivated or email not verified), `404` not a professional.
 
 #### `GET /bookings/my-bookings` → `Booking[]` (newest first)
 - Professional token → bookings where they're the pro, `seekerId` populated with `PublicUser`.
@@ -347,7 +353,7 @@ All `disputed` bookings, oldest first, with both parties populated (including `p
 | `/bookings/:id/resolve` | PUT | 👑 admin | `disputed` → `refunded` \| `released` | `Booking` |
 | `/bookings/:id/rating` | **POST** | seeker | must be `completed` \| `released`, not yet rated (status unchanged) | `201 Booking` (with `rating`) |
 
-`dispute` body: `{ reason: string }` (not validated server-side — validate client-side).
+`dispute` body: `{ reason: string }`, required after trimming and up to 1000 characters.
 
 `cancel` / `decline` body (optional): `{ reason?: string }` (max 500 chars). Once a booking is funded it can't be cancelled; the seeker has to raise a dispute instead. If the seeker pays an old checkout link after cancelling, the payment is **refunded automatically** and the booking ends up `refunded`.
 
@@ -356,6 +362,8 @@ All `disputed` bookings, oldest first, with both parties populated (including `p
 `rating` body: `{ rating: number }` (1–5). One rating per booking. It updates the professional's `averageRating`/`reviewCount`. A second attempt returns `400` "This booking has already been rated".
 
 `fund` is idempotent: repeat calls return the same `paymentUrl` and `reference`. It returns `409` if another `/fund` call for the same booking is still in progress, so retry after a moment.
+
+**Payout lifecycle:** a release sets `payoutStatus: 'pending'`, or `'paid'` if Paystack completes it instantly. Paystack's webhook then confirms `'paid'`. If the bank transfer later **fails or is reversed**, the booking goes back to `completed` (or back to `disputed` for an admin release) with `payoutStatus: 'failed'` and `payoutFailureReason`, and the professional's job count and earnings are reversed. Releasing again starts a fresh payout attempt.
 
 **Paystack failures return `502`** with Paystack's own reason in `message`, e.g. `"Paystack could not send the payout: …"`. This applies to `/fund`, `/release`, `/resolve` and `GET /payments/banks`. The booking stays in its previous status, so the action can be retried. A payout that Paystack holds for an OTP is rejected with `400` and the same rollback.
 

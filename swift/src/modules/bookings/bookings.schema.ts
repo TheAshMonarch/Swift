@@ -40,6 +40,17 @@ export class Booking extends Document {
   @Prop({ type: String })
   paystackTransferCode?: string; // used to release payout
 
+  // Payout lifecycle, confirmed by Paystack's transfer.* webhooks
+  @Prop({ type: String, enum: ['pending', 'paid', 'failed'] })
+  payoutStatus?: 'pending' | 'paid' | 'failed';
+
+  @Prop({ type: String })
+  payoutFailureReason?: string;
+
+  // Each attempt gets its own Paystack reference (payout_<id>, payout_<id>_2…)
+  @Prop({ type: Number, default: 0 })
+  payoutAttempts: number = 0;
+
   // Swift's commission (e.g. 10%)
   @Prop({ type: Number, default: 0 })
   commissionAmount: number = 0;
