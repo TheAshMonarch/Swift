@@ -52,9 +52,8 @@ const UserSchema = new mongoose.Schema({
 const User = mongoose.model('User', UserSchema);
 
 // --- SEED SELECTION DATA ---
-// Pre-calculated bcrypt hash for "password123" — verified at runtime below.
-const PASSWORD_HASH = '$2b$10$oX1yL3b9oZ54hZgK4rRMe.PZ61Uf.V.vWn/E0AOfkSszH/5j5U4z2';
 const PASSWORD_PLAIN = 'password123';
+const PASSWORD_HASH = bcrypt.hashSync(PASSWORD_PLAIN, 10);
 
 // Reference Uyo coordinates for realistic proximity searches [longitude, latitude]
 // Overridable via env so the seeder can target other cities.
