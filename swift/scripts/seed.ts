@@ -53,6 +53,7 @@ const UserSchema = new mongoose.Schema({
   proProfile: { type: ProProfileSchema, required: false },
   avatar: { type: String, required: false },
   workPhotos: { type: [WorkPhotoSchema], default: undefined },
+  isActive: { type: Boolean, default: true },
 }, { timestamps: true });
 
 const User = mongoose.model('User', UserSchema);
